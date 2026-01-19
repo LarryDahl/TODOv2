@@ -49,7 +49,7 @@ def edit_list_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
 
 
 def render_home_header() -> str:
-    return "Tekemättömät tehtävät\n\n"
+    return "Tehtävälista v2.0\n\nKlikkaa tehtävää merkataksesi sen suoritetuksi."
 
 
 def render_edit_header() -> str:
