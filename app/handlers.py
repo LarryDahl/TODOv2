@@ -55,15 +55,29 @@ async def _show_home_from_message(message: Message, repo: TasksRepo) -> None:
     """Show default home view from message"""
     completed = await repo.list_completed_tasks(user_id=message.from_user.id, limit=3)
     active = await repo.list_tasks(user_id=message.from_user.id, limit=7)
-    await message.answer(render_default_header(), reply_markup=default_kb(completed, active))
+    daily_progress = await repo.get_daily_progress(user_id=message.from_user.id)
+    
+    # Add separator text between lists if both exist
+    header_text = render_default_header(daily_progress)
+    if completed and active:
+        header_text += "\n\n─────────────"
+    
+    await message.answer(header_text, reply_markup=default_kb(completed, active))
 
 
 async def _show_home_from_cb(cb: CallbackQuery, repo: TasksRepo) -> None:
     """Show default home view from callback"""
     completed = await repo.list_completed_tasks(user_id=cb.from_user.id, limit=3)
     active = await repo.list_tasks(user_id=cb.from_user.id, limit=7)
+    daily_progress = await repo.get_daily_progress(user_id=cb.from_user.id)
+    
+    # Add separator text between lists if both exist
+    header_text = render_default_header(daily_progress)
+    if completed and active:
+        header_text += "\n\n─────────────"
+    
     if cb.message:
-        await cb.message.edit_text(render_default_header(), reply_markup=default_kb(completed, active))
+        await cb.message.edit_text(header_text, reply_markup=default_kb(completed, active))
     await cb.answer()
 
 

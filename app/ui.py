@@ -26,14 +26,10 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
             )
         )
     
-    # Aloitusviesti listojen väliin
+    # Separator between lists (text indicator, not a button)
     if completed_tasks and active_tasks:
-        kb.row(
-            InlineKeyboardButton(
-                text="(ALOISTUSVIESTI)",
-                callback_data="noop",
-            )
-        )
+        # Use a non-clickable separator - we'll add this in the message text instead
+        pass
     
     # 7 next active tasks
     for task in active_tasks[:7]:
@@ -155,8 +151,17 @@ def add_task_category_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def render_default_header() -> str:
-    return "Tehtävälista\n\nKlikkaa tehtävää merkataksesi sen suoritetuksi.\nKlikkaa tehtyä tehtävää palauttaaksesi sen listalle."
+def render_progress_bar(progress_percent: int) -> str:
+    """Render progress bar: 10 parts, fills 10% at a time"""
+    filled = progress_percent // 10
+    empty = 10 - filled
+    return "█" * filled + "░" * empty + f" {progress_percent}%"
+
+
+def render_default_header(daily_progress: int) -> str:
+    """Render default view header with progress bar"""
+    progress_bar = render_progress_bar(daily_progress)
+    return f"{progress_bar}\n\nTehtävälista\n\nKlikkaa tehtävää merkataksesi sen suoritetuksi.\nKlikkaa tehtyä tehtävää palauttaaksesi sen listalle."
 
 
 def render_settings_header() -> str:

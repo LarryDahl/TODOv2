@@ -303,6 +303,25 @@ class TasksRepo:
                 'days': days
             }
     
+    async def get_daily_progress(self, user_id: int) -> int:
+        """Get today's progress: 1 task = 10%, max 100% (10 tasks)"""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Count completed tasks today (since midnight UTC)
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM task_events
+                WHERE user_id = ? AND action = 'completed'
+                AND date(at) = date('now');
+                """,
+                (user_id,),
+            )
+            count = (await cur.fetchone())['count']
+            # 1 task = 10%, max 100% (10 tasks)
+            progress = min(count * 10, 100)
+            return progress
+    
     async def reset_all_data(self, user_id: int) -> None:
         """Reset all data for a user"""
         async with aiosqlite.connect(self._db_path) as db:
