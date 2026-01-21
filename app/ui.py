@@ -15,26 +15,32 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
     """Default view: 3 completed tasks, 7 active tasks, settings/stats, edit/add buttons"""
     kb = InlineKeyboardBuilder()
     
-    # 3 most recently completed tasks (numbered from 1, most recent first)
-    for i, comp_task in enumerate(completed_tasks):
-        task_num = len(completed_tasks) - i  # 3, 2, 1
-        task_text = _label(comp_task['text'], 35)
+    # 3 most recently completed tasks (reverse order: oldest first, newest last)
+    # So newest is at bottom: [tehty tehtävä 3] [tehty tehtävä 2] [tehty tehtävä 1]
+    for i, comp_task in enumerate(reversed(completed_tasks), 1):
+        task_text = _label(comp_task['text'], 48)
         kb.row(
             InlineKeyboardButton(
-                text=f"[tehty tehtävä {task_num}] {task_text}",
+                text=task_text,
                 callback_data=f"completed:restore:{comp_task['id']}",
             )
         )
     
-    # Visual separator - skip if no tasks
-    # (We'll just show tasks without explicit separator)
-    
-    # 7 next active tasks (numbered)
-    for i, task in enumerate(active_tasks[:7], 1):
-        task_text = _label(task.text, 35)
+    # Aloitusviesti listojen väliin
+    if completed_tasks and active_tasks:
         kb.row(
             InlineKeyboardButton(
-                text=f"[tehtävä{i}] {task_text}",
+                text="(ALOISTUSVIESTI)",
+                callback_data="noop",
+            )
+        )
+    
+    # 7 next active tasks
+    for task in active_tasks[:7]:
+        task_text = _label(task.text, 48)
+        kb.row(
+            InlineKeyboardButton(
+                text=task_text,
                 callback_data=f"task:done:{task.id}",
             )
         )

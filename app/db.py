@@ -230,6 +230,13 @@ class TasksRepo:
                     now
                 ),
             )
+            
+            # Remove the completed event so it disappears from completed tasks list
+            await db.execute(
+                "DELETE FROM task_events WHERE id = ?;",
+                (event_id,),
+            )
+            
             await db.commit()
             return True
     
