@@ -190,7 +190,10 @@ async def cb_delete(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> No
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
         return
 
+    # Poista tehtävä ja kirjaa poisto
     await repo.delete_task_with_log(user_id=cb.from_user.id, task_id=task_id)
+
+    # Poiston jälkeen palataan kotilistanäkymään
     await _show_home_from_cb(cb, repo)
 
 
