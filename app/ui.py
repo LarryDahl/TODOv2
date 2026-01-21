@@ -14,6 +14,13 @@ def _label(text: str, max_len: int = 48) -> str:
 def home_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
+    # Ylärivi: [Lisää][Muokkaa] – näkyy heti, ennen tehtävälistaa
+    kb.row(
+        InlineKeyboardButton(text="Lisää", callback_data="home:add"),
+        InlineKeyboardButton(text="Muokkaa", callback_data="home:edit"),
+        width=2,
+    )
+
     # Tehtävät: yksi nappi per rivi, klikkaus = suoritettu
     for t in tasks:
         kb.row(
@@ -23,12 +30,6 @@ def home_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
             )
         )
 
-    # Alarivi: [Lisää][Muokkaa]
-    kb.row(
-        InlineKeyboardButton(text="Lisää", callback_data="home:add"),
-        InlineKeyboardButton(text="Muokkaa", callback_data="home:edit"),
-        width=2,
-    )
     return kb.as_markup()
 
 

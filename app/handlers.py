@@ -95,10 +95,11 @@ async def cb_delete(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> No
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
         return
 
+    # Poista tehtävä ja kirjaa poisto
     await repo.delete_task_with_log(user_id=cb.from_user.id, task_id=task_id)
 
-    # Pysytään muokkausnäkymässä poiston jälkeen (kuten nytkin)
-    await _show_edit_list(cb, repo)
+    # Poiston jälkeen palataan kotilistanäkymään
+    await _show_home_from_cb(cb, repo)
 
 
 @router.callback_query(F.data.startswith("task:edit:"))
