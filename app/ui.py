@@ -45,18 +45,20 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
             )
         )
     
-    # Bottom buttons: asetukset, tilastot
+    # Bottom buttons: lisää, tehty, poistettu
+    kb.row(
+        InlineKeyboardButton(text="➕ Lisää", callback_data="view:add"),
+        InlineKeyboardButton(text="✅ Tehty", callback_data="view:done"),
+        InlineKeyboardButton(text="🗑 Poistettu", callback_data="view:deleted"),
+        width=3,
+    )
+    
+    # Bottom buttons: asetukset, tilastot, muokkaa
     kb.row(
         InlineKeyboardButton(text="asetukset", callback_data="view:settings"),
         InlineKeyboardButton(text="tilastot", callback_data="view:stats"),
-        width=2,
-    )
-    
-    # Bottom buttons: muokkaa, lisää
-    kb.row(
         InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
-        InlineKeyboardButton(text="lisää", callback_data="view:add"),
-        width=2,
+        width=3,
     )
     
     return kb.as_markup()
@@ -291,4 +293,103 @@ def schedule_type_kb() -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="Aikaväli", callback_data="schedule:type:time_range"))
     kb.row(InlineKeyboardButton(text="Koko päivä", callback_data="schedule:type:all_day"))
     kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def done_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
+    """Done tasks view keyboard with pagination."""
+    kb = InlineKeyboardBuilder()
+    
+    # Show tasks (read-only, no action buttons)
+    for task in tasks:
+        task_text = _label(task.get('title', ''), 48)
+        # Format date if available
+        updated_at = task.get('updated_at', '')
+        if updated_at:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                date_str = dt.strftime("%Y-%m-%d %H:%M")
+            except:
+                date_str = updated_at[:10] if len(updated_at) >= 10 else updated_at
+        else:
+            date_str = ""
+        
+        display_text = f"✓ {task_text}"
+        if date_str:
+            display_text += f" ({date_str})"
+        
+        kb.row(
+            InlineKeyboardButton(
+                text=display_text,
+                callback_data="noop"  # Read-only, no action
+            )
+        )
+    
+    # Pagination: Show more button if we got a full page
+    if len(tasks) >= 50:
+        kb.row(
+            InlineKeyboardButton(
+                text="📄 Näytä lisää",
+                callback_data=f"done:page:{offset + 50}"
+            )
+        )
+    
+    # Back button
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def deleted_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
+    """Deleted tasks view keyboard with restore buttons and pagination."""
+    kb = InlineKeyboardBuilder()
+    
+    # Show tasks with restore buttons
+    for task in tasks:
+        task_text = _label(task.get('title', ''), 35)
+        event_id = task.get('job_id')
+        
+        # Format date if available
+        updated_at = task.get('updated_at', '')
+        if updated_at:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                date_str = dt.strftime("%Y-%m-%d %H:%M")
+            except:
+                date_str = updated_at[:10] if len(updated_at) >= 10 else updated_at
+        else:
+            date_str = ""
+        
+        display_text = f"🗑 {task_text}"
+        if date_str:
+            display_text += f" ({date_str})"
+        
+        kb.row(
+            InlineKeyboardButton(
+                text=display_text,
+                callback_data="noop"  # Read-only title
+            )
+        )
+        
+        # Restore button
+        if event_id:
+            kb.row(
+                InlineKeyboardButton(
+                    text="♻️ Palauta",
+                    callback_data=f"deleted:restore:{event_id}"
+                )
+            )
+    
+    # Pagination: Show more button if we got a full page
+    if len(tasks) >= 50:
+        kb.row(
+            InlineKeyboardButton(
+                text="📄 Näytä lisää",
+                callback_data=f"deleted:page:{offset + 50}"
+            )
+        )
+    
+    # Back button
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
     return kb.as_markup()

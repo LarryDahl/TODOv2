@@ -17,6 +17,8 @@ from app.ui import (
     add_task_type_kb,
     date_picker_kb,
     default_kb,
+    deleted_tasks_kb,
+    done_tasks_kb,
     edit_kb,
     render_add_category_header,
     render_add_difficulty_header,
@@ -147,6 +149,87 @@ async def cb_edit_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     if cb.message:
         await cb.message.edit_text(render_edit_header(), reply_markup=edit_kb(tasks))
     await cb.answer()
+
+
+@router.callback_query(F.data == "view:done")
+async def cb_done_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show done tasks view"""
+    await state.clear()
+    tasks = await repo.list_done_tasks(user_id=cb.from_user.id, limit=50, offset=0)
+    if cb.message:
+        header = f"✅ Tehdyt tehtävät\n\nYhteensä: {len(tasks)} tehtävää"
+        await cb.message.edit_text(header, reply_markup=done_tasks_kb(tasks, offset=0))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("done:page:"))
+async def cb_done_page(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show next page of done tasks"""
+    await state.clear()
+    _, _, offset_str = cb.data.split(":", 2)
+    try:
+        offset = int(offset_str)
+    except ValueError:
+        await cb.answer("Virheellinen sivu.", show_alert=True)
+        return
+    
+    tasks = await repo.list_done_tasks(user_id=cb.from_user.id, limit=50, offset=offset)
+    if cb.message:
+        header = f"✅ Tehdyt tehtävät\n\nSivu {offset // 50 + 1}"
+        await cb.message.edit_text(header, reply_markup=done_tasks_kb(tasks, offset=offset))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "view:deleted")
+async def cb_deleted_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show deleted tasks view"""
+    await state.clear()
+    tasks = await repo.list_deleted_tasks(user_id=cb.from_user.id, limit=50, offset=0)
+    if cb.message:
+        header = f"🗑 Poistetut tehtävät\n\nYhteensä: {len(tasks)} tehtävää\n\nKlikkaa 'Palauta' palauttaaksesi tehtävän."
+        await cb.message.edit_text(header, reply_markup=deleted_tasks_kb(tasks, offset=0))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("deleted:page:"))
+async def cb_deleted_page(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show next page of deleted tasks"""
+    await state.clear()
+    _, _, offset_str = cb.data.split(":", 2)
+    try:
+        offset = int(offset_str)
+    except ValueError:
+        await cb.answer("Virheellinen sivu.", show_alert=True)
+        return
+    
+    tasks = await repo.list_deleted_tasks(user_id=cb.from_user.id, limit=50, offset=offset)
+    if cb.message:
+        header = f"🗑 Poistetut tehtävät\n\nSivu {offset // 50 + 1}\n\nKlikkaa 'Palauta' palauttaaksesi tehtävän."
+        await cb.message.edit_text(header, reply_markup=deleted_tasks_kb(tasks, offset=offset))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("deleted:restore:"))
+async def cb_restore_deleted(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Restore a deleted task"""
+    await state.clear()
+    _, _, event_id_str = cb.data.split(":", 2)
+    try:
+        event_id = int(event_id_str)
+    except ValueError:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        return
+    
+    success = await repo.restore_deleted_task(user_id=cb.from_user.id, event_id=event_id)
+    if success:
+        # Refresh deleted tasks view
+        tasks = await repo.list_deleted_tasks(user_id=cb.from_user.id, limit=50, offset=0)
+        if cb.message:
+            header = f"🗑 Poistetut tehtävät\n\nYhteensä: {len(tasks)} tehtävää\n\nKlikkaa 'Palauta' palauttaaksesi tehtävän."
+            await cb.message.edit_text(header, reply_markup=deleted_tasks_kb(tasks, offset=0))
+        await cb.answer("Tehtävä palautettu")
+    else:
+        await cb.answer("Tehtävää ei voitu palauttaa.", show_alert=True)
 
 
 @router.callback_query(F.data == "view:stats")

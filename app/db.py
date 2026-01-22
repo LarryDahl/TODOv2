@@ -368,6 +368,66 @@ class TasksRepo:
             row = await cur.fetchone()
             return dict(row) if row else None
     
+    async def restore_deleted_task(self, user_id: int, event_id: int) -> bool:
+        """Restore a deleted task back to the task list using event id"""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Get the deleted task event
+            cur = await db.execute(
+                """
+                SELECT id, task_id, text, at
+                FROM task_events
+                WHERE user_id = ? AND action = 'deleted' AND id = ?;
+                """,
+                (user_id, event_id),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return False
+            
+            # Try to get original task data if task_id exists (might be None if task was already deleted)
+            original_task = None
+            if row['task_id']:
+                # Task is already deleted, so we can't get it from tasks table
+                # We'll restore with defaults and user can edit if needed
+                pass
+            
+            # Add task back with original data or defaults
+            # Re-parse priority from text when restoring
+            restore_text = row['text']
+            clean_title, priority = parse_priority(restore_text)
+            now = self._now_iso()
+            cur = await db.execute(
+                """
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    user_id,
+                    clean_title,
+                    original_task.task_type if original_task else 'regular',
+                    original_task.difficulty if original_task else 5,
+                    original_task.category if original_task else '',
+                    original_task.deadline if original_task else None,
+                    original_task.scheduled_time if original_task else None,
+                    priority,
+                    'bang_suffix',
+                    original_task.schedule_kind if original_task else None,
+                    original_task.schedule_json if original_task else None,
+                    now,
+                    now
+                ),
+            )
+            
+            # Remove the deleted event so it disappears from deleted tasks list
+            await db.execute(
+                "DELETE FROM task_events WHERE id = ?;",
+                (event_id,),
+            )
+            
+            await db.commit()
+            return True
+    
     async def get_statistics(self, user_id: int, days: int) -> dict:
         """Get statistics for the last N days"""
         async with aiosqlite.connect(self._db_path) as db:
