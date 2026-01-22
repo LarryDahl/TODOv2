@@ -71,22 +71,38 @@ def settings_kb() -> InlineKeyboardMarkup:
 
 
 def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
-    """Edit view: muokkaa tehtävää n, poista for each task, takaisin"""
+    """Edit view: muokkaa tehtävää, deadline, schedule, poista for each task, takaisin"""
     kb = InlineKeyboardBuilder()
     
     for task in tasks:
         # Render title with priority indicators (!)
         rendered_title = render_title_with_priority(task.text, task.priority)
+        task_text = _label(rendered_title, 35)
+        
+        # Task title button (marks as done)
         kb.row(
             InlineKeyboardButton(
-                text=f"muokkaa {_label(rendered_title, 30)}",
+                text=task_text,
+                callback_data=f"task:done:{task.id}",
+            )
+        )
+        
+        # Action buttons: muokkaa, deadline, schedule, poista
+        kb.row(
+            InlineKeyboardButton(
+                text=f"✏️ Muokkaa",
                 callback_data=f"task:edit:{task.id}",
             ),
-            InlineKeyboardButton(text="poista", callback_data=f"task:del:{task.id}"),
+            InlineKeyboardButton(text="⏰ Deadline", callback_data=f"task:deadline:{task.id}"),
+            width=2,
+        )
+        kb.row(
+            InlineKeyboardButton(text="🗓 Schedule", callback_data=f"task:schedule:{task.id}"),
+            InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"),
             width=2,
         )
     
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -205,3 +221,74 @@ def render_add_difficulty_header() -> str:
 
 def render_add_category_header() -> str:
     return "Kategoria\n\nValitse tehtävän kategoria tai skip jos haluat jättää tyhjäksi."
+
+
+def date_picker_kb(prefix: str, include_none: bool = True) -> InlineKeyboardMarkup:
+    """
+    Date picker keyboard for deadline/schedule selection.
+    
+    Args:
+        prefix: Callback data prefix (e.g., "deadline:date" or "schedule:date")
+        include_none: Whether to include "No deadline" / "None" option
+    """
+    kb = InlineKeyboardBuilder()
+    
+    if include_none:
+        kb.row(InlineKeyboardButton(text="Ei määräaikaa", callback_data=f"{prefix}:none"))
+    
+    kb.row(
+        InlineKeyboardButton(text="Tänään", callback_data=f"{prefix}:0"),
+        InlineKeyboardButton(text="Huomenna", callback_data=f"{prefix}:1"),
+        width=2,
+    )
+    
+    # Next 7 days
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    for i in range(2, 9):
+        date = now + timedelta(days=i)
+        day_name = date.strftime("%a")  # Mon, Tue, etc.
+        day_num = date.day
+        kb.row(InlineKeyboardButton(
+            text=f"{day_name} {day_num}",
+            callback_data=f"{prefix}:{i}"
+        ))
+    
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def time_picker_kb(prefix: str) -> InlineKeyboardMarkup:
+    """
+    Time picker keyboard with preset times and custom option.
+    
+    Args:
+        prefix: Callback data prefix (e.g., "deadline:time" or "schedule:time")
+    """
+    kb = InlineKeyboardBuilder()
+    
+    kb.row(
+        InlineKeyboardButton(text="09:00", callback_data=f"{prefix}:09:00"),
+        InlineKeyboardButton(text="12:00", callback_data=f"{prefix}:12:00"),
+        width=2,
+    )
+    kb.row(
+        InlineKeyboardButton(text="18:00", callback_data=f"{prefix}:18:00"),
+        InlineKeyboardButton(text="21:00", callback_data=f"{prefix}:21:00"),
+        width=2,
+    )
+    kb.row(InlineKeyboardButton(text="Muu aika", callback_data=f"{prefix}:custom"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data=f"{prefix}:back"))
+    return kb.as_markup()
+
+
+def schedule_type_kb() -> InlineKeyboardMarkup:
+    """Schedule type selection keyboard."""
+    kb = InlineKeyboardBuilder()
+    
+    kb.row(InlineKeyboardButton(text="Ei aikataulua", callback_data="schedule:type:none"))
+    kb.row(InlineKeyboardButton(text="Tietty aika", callback_data="schedule:type:at_time"))
+    kb.row(InlineKeyboardButton(text="Aikaväli", callback_data="schedule:type:time_range"))
+    kb.row(InlineKeyboardButton(text="Koko päivä", callback_data="schedule:type:all_day"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
