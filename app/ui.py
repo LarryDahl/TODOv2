@@ -4,6 +4,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db import Task
+from app.priority import render_title_with_priority
 
 
 def _label(text: str, max_len: int = 48) -> str:
@@ -16,12 +17,13 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
     kb = InlineKeyboardBuilder()
     
     # 3 most recently completed tasks (reverse order: oldest first, newest last)
-    # So newest is at bottom: [tehty tehtävä 3] [tehty tehtävä 2] [tehty tehtävä 1]
+    # So newest is at bottom: tehty tehtävä 3, tehty tehtävä 2, tehty tehtävä 1
+    # Use check mark to indicate completed tasks
     for i, comp_task in enumerate(reversed(completed_tasks), 1):
-        task_text = _label(comp_task['text'], 48)
+        task_text = _label(comp_task['text'], 47)
         kb.row(
             InlineKeyboardButton(
-                text=task_text,
+                text=f"✓ {task_text}",
                 callback_data=f"completed:restore:{comp_task['id']}",
             )
         )
@@ -33,7 +35,9 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
     
     # 7 next active tasks
     for task in active_tasks[:7]:
-        task_text = _label(task.text, 48)
+        # Render title with priority indicators (!)
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        task_text = _label(rendered_title, 48)
         kb.row(
             InlineKeyboardButton(
                 text=task_text,
@@ -41,17 +45,17 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
             )
         )
     
-    # Bottom buttons: [asetukset][tilastot]
+    # Bottom buttons: asetukset, tilastot
     kb.row(
-        InlineKeyboardButton(text="[asetukset]", callback_data="view:settings"),
-        InlineKeyboardButton(text="[tilastot]", callback_data="view:stats"),
+        InlineKeyboardButton(text="asetukset", callback_data="view:settings"),
+        InlineKeyboardButton(text="tilastot", callback_data="view:stats"),
         width=2,
     )
     
-    # Bottom buttons: [muokkaa][lisää]
+    # Bottom buttons: muokkaa, lisää
     kb.row(
-        InlineKeyboardButton(text="[muokkaa]", callback_data="view:edit"),
-        InlineKeyboardButton(text="[lisää]", callback_data="view:add"),
+        InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
+        InlineKeyboardButton(text="lisää", callback_data="view:add"),
         width=2,
     )
     
@@ -59,28 +63,30 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
 
 
 def settings_kb() -> InlineKeyboardMarkup:
-    """Settings view: [nollaa][takaisin]"""
+    """Settings view: nollaa, takaisin"""
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="[nollaa]", callback_data="settings:reset"))
-    kb.row(InlineKeyboardButton(text="[takaisin]", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="nollaa", callback_data="settings:reset"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
 def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
-    """Edit view: [muokkaa tehtävää n][poista] for each task, [takaisin]"""
+    """Edit view: muokkaa tehtävää n, poista for each task, takaisin"""
     kb = InlineKeyboardBuilder()
     
-    for task in tasks[:10]:  # Limit to 10 for UI
+    for task in tasks:
+        # Render title with priority indicators (!)
+        rendered_title = render_title_with_priority(task.text, task.priority)
         kb.row(
             InlineKeyboardButton(
-                text=f"[muokkaa {_label(task.text, 30)}]",
+                text=f"muokkaa {_label(rendered_title, 30)}",
                 callback_data=f"task:edit:{task.id}",
             ),
-            InlineKeyboardButton(text="[poista]", callback_data=f"task:del:{task.id}"),
+            InlineKeyboardButton(text="poista", callback_data=f"task:del:{task.id}"),
             width=2,
         )
     
-    kb.row(InlineKeyboardButton(text="[takaisin]", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -88,17 +94,17 @@ def stats_kb() -> InlineKeyboardMarkup:
     """Statistics view: analysis buttons and back"""
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="[analyysi 1vko]", callback_data="stats:7"),
-        InlineKeyboardButton(text="[analyysi 1kk]", callback_data="stats:30"),
+        InlineKeyboardButton(text="analyysi 1vko", callback_data="stats:7"),
+        InlineKeyboardButton(text="analyysi 1kk", callback_data="stats:30"),
         width=2,
     )
     kb.row(
-        InlineKeyboardButton(text="[analyysi 3kk]", callback_data="stats:90"),
-        InlineKeyboardButton(text="[analyysi 6kk]", callback_data="stats:180"),
+        InlineKeyboardButton(text="analyysi 3kk", callback_data="stats:90"),
+        InlineKeyboardButton(text="analyysi 6kk", callback_data="stats:180"),
         width=2,
     )
-    kb.row(InlineKeyboardButton(text="[analyysi 1v]", callback_data="stats:365"))
-    kb.row(InlineKeyboardButton(text="[takaisin]", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="analyysi 1v", callback_data="stats:365"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -106,12 +112,12 @@ def add_task_type_kb() -> InlineKeyboardMarkup:
     """Add task: type selection"""
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="[deadline]", callback_data="add:type:deadline"),
-        InlineKeyboardButton(text="[scheduled]", callback_data="add:type:scheduled"),
-        InlineKeyboardButton(text="[regular]", callback_data="add:type:regular"),
+        InlineKeyboardButton(text="deadline", callback_data="add:type:deadline"),
+        InlineKeyboardButton(text="scheduled", callback_data="add:type:scheduled"),
+        InlineKeyboardButton(text="regular", callback_data="add:type:regular"),
         width=3,
     )
-    kb.row(InlineKeyboardButton(text="[takaisin]", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -119,13 +125,13 @@ def add_task_difficulty_kb() -> InlineKeyboardMarkup:
     """Add task: difficulty selection"""
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="[1%]", callback_data="add:difficulty:1"),
-        InlineKeyboardButton(text="[5%]", callback_data="add:difficulty:5"),
-        InlineKeyboardButton(text="[10%]", callback_data="add:difficulty:10"),
+        InlineKeyboardButton(text="1%", callback_data="add:difficulty:1"),
+        InlineKeyboardButton(text="5%", callback_data="add:difficulty:5"),
+        InlineKeyboardButton(text="10%", callback_data="add:difficulty:10"),
         width=3,
     )
-    kb.row(InlineKeyboardButton(text="[muu %]", callback_data="add:difficulty:custom"))
-    kb.row(InlineKeyboardButton(text="[takaisin]", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="muu %", callback_data="add:difficulty:custom"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -133,21 +139,21 @@ def add_task_category_kb() -> InlineKeyboardMarkup:
     """Add task: category selection"""
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="[liikunta]", callback_data="add:category:liikunta"),
-        InlineKeyboardButton(text="[arki]", callback_data="add:category:arki"),
+        InlineKeyboardButton(text="liikunta", callback_data="add:category:liikunta"),
+        InlineKeyboardButton(text="arki", callback_data="add:category:arki"),
         width=2,
     )
     kb.row(
-        InlineKeyboardButton(text="[opiskelu]", callback_data="add:category:opiskelu"),
-        InlineKeyboardButton(text="[suhteet]", callback_data="add:category:suhteet"),
+        InlineKeyboardButton(text="opiskelu", callback_data="add:category:opiskelu"),
+        InlineKeyboardButton(text="suhteet", callback_data="add:category:suhteet"),
         width=2,
     )
     kb.row(
-        InlineKeyboardButton(text="[muu]", callback_data="add:category:muu"),
-        InlineKeyboardButton(text="[skip]", callback_data="add:category:"),
+        InlineKeyboardButton(text="muu", callback_data="add:category:muu"),
+        InlineKeyboardButton(text="skip", callback_data="add:category:"),
         width=2,
     )
-    kb.row(InlineKeyboardButton(text="[takaisin]", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -165,7 +171,7 @@ def render_default_header(daily_progress: int) -> str:
 
 
 def render_settings_header() -> str:
-    return "Asetukset\n\n[nollaa] - Poistaa kaikki tehtävät ja tilastot"
+    return "Asetukset\n\nnollaa - Poistaa kaikki tehtävät ja tilastot"
 
 
 def render_edit_header() -> str:
@@ -198,4 +204,4 @@ def render_add_difficulty_header() -> str:
 
 
 def render_add_category_header() -> str:
-    return "Kategoria\n\nValitse tehtävän kategoria tai [skip] jos haluat jättää tyhjäksi."
+    return "Kategoria\n\nValitse tehtävän kategoria tai skip jos haluat jättää tyhjäksi."

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.priority import parse_priority
+
 
 @dataclass(frozen=True)
 class Task:
@@ -16,6 +18,8 @@ class Task:
     category: str  # 'liikunta', 'arki', 'opiskelu', 'suhteet', 'muu', ''
     deadline: Optional[str]  # ISO datetime for deadline tasks
     scheduled_time: Optional[str]  # ISO datetime for scheduled tasks
+    priority: int  # 0 to 5, derived from trailing '!' in title
+    priority_source: str  # 'bang_suffix' or future AI-based sources
     created_at: str
     updated_at: str
 
@@ -44,6 +48,8 @@ class TasksRepo:
                     category TEXT NOT NULL DEFAULT '',
                     deadline TEXT,
                     scheduled_time TEXT,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    priority_source TEXT NOT NULL DEFAULT 'bang_suffix',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -61,6 +67,10 @@ class TasksRepo:
                 await db.execute("ALTER TABLE tasks ADD COLUMN deadline TEXT;")
             if 'scheduled_time' not in columns:
                 await db.execute("ALTER TABLE tasks ADD COLUMN scheduled_time TEXT;")
+            if 'priority' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;")
+            if 'priority_source' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN priority_source TEXT NOT NULL DEFAULT 'bang_suffix';")
             
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);")
 
@@ -84,10 +94,13 @@ class TasksRepo:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ?
-                ORDER BY id ASC
+                ORDER BY priority DESC, 
+                         CASE WHEN deadline IS NULL THEN 1 ELSE 0 END,
+                         deadline ASC,
+                         created_at ASC
                 LIMIT ?;
                 """,
                 (user_id, limit),
@@ -122,14 +135,16 @@ class TasksRepo:
         deadline: Optional[str] = None,
         scheduled_time: Optional[str] = None
     ) -> int:
+        # Parse priority from trailing exclamation marks
+        clean_title, priority = parse_priority(text)
         now = self._now_iso()
         async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (user_id, text, task_type, difficulty, category, deadline, scheduled_time, now, now),
+                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', now, now),
             )
             await db.commit()
             return int(cur.lastrowid)
@@ -139,7 +154,7 @@ class TasksRepo:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ? AND id = ?;
                 """,
@@ -149,15 +164,17 @@ class TasksRepo:
             return Task(**dict(row)) if row else None
 
     async def update_task(self, user_id: int, task_id: int, new_text: str) -> bool:
+        # Re-parse priority from text (always recompute, never reuse old priority)
+        clean_title, priority = parse_priority(new_text)
         now = self._now_iso()
         async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
                 """
                 UPDATE tasks
-                SET text = ?, updated_at = ?
+                SET text = ?, priority = ?, priority_source = ?, updated_at = ?
                 WHERE user_id = ? AND id = ?;
                 """,
-                (new_text, now, user_id, task_id),
+                (clean_title, priority, 'bang_suffix', now, user_id, task_id),
             )
             await db.commit()
             return cur.rowcount > 0
@@ -212,20 +229,25 @@ class TasksRepo:
                 original_task = await self.get_task(user_id=user_id, task_id=row['task_id'])
             
             # Add task back with original data or defaults
+            # Re-parse priority from text when restoring
+            restore_text = row['text']
+            clean_title, priority = parse_priority(restore_text)
             now = self._now_iso()
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     user_id,
-                    row['text'],
+                    clean_title,
                     original_task.task_type if original_task else 'regular',
                     original_task.difficulty if original_task else 5,
                     original_task.category if original_task else '',
                     original_task.deadline if original_task else None,
                     original_task.scheduled_time if original_task else None,
+                    priority,
+                    'bang_suffix',
                     now,
                     now
                 ),
