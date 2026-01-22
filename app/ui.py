@@ -4,6 +4,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db import Task
+from app.priority import render_title_with_priority
 
 
 def _label(text: str, max_len: int = 48) -> str:
@@ -34,7 +35,9 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
     
     # 7 next active tasks
     for task in active_tasks[:7]:
-        task_text = _label(task.text, 48)
+        # Render title with priority indicators (!)
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        task_text = _label(rendered_title, 48)
         kb.row(
             InlineKeyboardButton(
                 text=task_text,
@@ -71,10 +74,12 @@ def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
     """Edit view: muokkaa tehtävää n, poista for each task, takaisin"""
     kb = InlineKeyboardBuilder()
     
-    for task in tasks[:10]:  # Limit to 10 for UI
+    for task in tasks:
+        # Render title with priority indicators (!)
+        rendered_title = render_title_with_priority(task.text, task.priority)
         kb.row(
             InlineKeyboardButton(
-                text=f"muokkaa {_label(task.text, 30)}",
+                text=f"muokkaa {_label(rendered_title, 30)}",
                 callback_data=f"task:edit:{task.id}",
             ),
             InlineKeyboardButton(text="poista", callback_data=f"task:del:{task.id}"),

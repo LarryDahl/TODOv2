@@ -9,6 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from app.db import TasksRepo
+from app.priority import render_title_with_priority
 from app.ui import (
     add_task_category_kb,
     add_task_difficulty_kb,
@@ -118,7 +119,7 @@ async def cb_reset(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> Non
 @router.callback_query(F.data == "view:edit")
 async def cb_edit_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     await state.clear()
-    tasks = await repo.list_tasks(user_id=cb.from_user.id, limit=10)
+    tasks = await repo.list_tasks(user_id=cb.from_user.id)
     if cb.message:
         await cb.message.edit_text(render_edit_header(), reply_markup=edit_kb(tasks))
     await cb.answer()
@@ -214,8 +215,10 @@ async def cb_edit(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
     await state.set_state(Flow.waiting_edit_task_text)
     await state.update_data({CtxKeys.edit_task_id: task_id})
     if cb.message:
+        # Show current task with priority indicators
+        current_title = render_title_with_priority(task.text, task.priority)
         await cb.message.answer(
-            f"Muokkaa tehtävää:\n\nNykyinen:\n{task.text}\n\nKirjoita uusi teksti viestinä."
+            f"Muokkaa tehtävää:\n\nNykyinen:\n{current_title}\n\nKirjoita uusi teksti viestinä."
         )
     await cb.answer()
 
