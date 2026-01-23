@@ -20,6 +20,7 @@ from app.ui import (
     render_stats_header,
     settings_kb,
     stats_kb,
+    task_action_kb,
 )
 
 router = Router()

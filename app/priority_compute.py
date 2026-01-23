@@ -40,10 +40,10 @@ def _calculate_urgency_boost(hours_until: float, urgency_hours: float, base_boos
 # Configurable weights for priority computation
 PRIORITY_WEIGHTS = {
     "base_priority": 1.0,  # Multiplier for base priority (0-5 from '!' syntax)
-    "deadline_base": 10.0,  # Base boost for having a deadline
+    "deadline_base": 1.0,  # Base boost for having a deadline
     "deadline_urgency_hours": 24.0,  # Hours before deadline when urgency kicks in
     "deadline_overdue_boost": 50.0,  # Boost for overdue tasks
-    "schedule_base": 5.0,  # Base boost for having a schedule
+    "schedule_base": 1.0,  # Base boost for having a schedule
     "schedule_urgency_hours": 2.0,  # Hours before scheduled time when urgency kicks in
     "schedule_passed_boost": 30.0,  # Boost for tasks with passed schedule window
 }
