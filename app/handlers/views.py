@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.db import TasksRepo
-from app.handlers.common import CtxKeys, _show_home_from_cb, _show_home_from_message
+from app.handlers.common import CtxKeys, return_to_main_menu
 from app.utils import parse_callback_data, parse_int_safe
 from app.ui import (
     deleted_tasks_kb,
@@ -28,23 +28,18 @@ router = Router()
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext, repo: TasksRepo) -> None:
-    await state.clear()
-    await _show_home_from_message(message, repo)
+    await return_to_main_menu(message, repo, state=state)
 
 
 @router.callback_query(F.data == "view:home")
 async def cb_home(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    await state.clear()
-    # Force refresh to ensure list shows correct order after edits
-    await _show_home_from_cb(cb, repo, force_refresh=True)
+    await return_to_main_menu(cb, repo, state=state, force_refresh=True)
 
 
 @router.callback_query(F.data == "view:refresh")
 async def cb_refresh(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Refresh the main menu task list to show latest changes and approaching deadlines"""
-    await state.clear()
-    # Force refresh to ensure list updates visibly
-    await _show_home_from_cb(cb, repo, answer_text="Lista päivitetty", force_refresh=True)
+    await return_to_main_menu(cb, repo, state=state, answer_text="Lista päivitetty", force_refresh=True)
 
 
 @router.callback_query(F.data == "noop")
@@ -84,7 +79,7 @@ async def cb_done_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     await state.clear()
     tasks = await repo.list_done_tasks(user_id=cb.from_user.id, limit=50, offset=0)
     if cb.message:
-        header = f"✅ Tehdyt tehtävät\n\nYhteensä: {len(tasks)} tehtävää"
+        header = f"✅ Tehdyt tehtävät\n\nYhteensä: {len(tasks)} tehtävää\n\nKlikkaa tehtävää palauttaaksesi sen aktiiviseksi."
         await cb.message.edit_text(header, reply_markup=done_tasks_kb(tasks, offset=0))
     await cb.answer()
 
@@ -98,15 +93,42 @@ async def cb_done_page(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     
     if offset is None:
         await cb.answer("Virheellinen sivu.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     tasks = await repo.list_done_tasks(user_id=cb.from_user.id, limit=50, offset=offset)
     if cb.message:
         await cb.message.edit_text(
-            f"✅ Tehdyt tehtävät\n\nSivu {offset // 50 + 1}",
+            f"✅ Tehdyt tehtävät\n\nSivu {offset // 50 + 1}\n\nKlikkaa tehtävää palauttaaksesi sen aktiiviseksi.",
             reply_markup=done_tasks_kb(tasks, offset=offset)
         )
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("done:restore:"))
+async def cb_done_restore(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Restore a completed task to active list"""
+    from app.handlers.common import return_to_main_menu
+    
+    parts = parse_callback_data(cb.data, 3)
+    event_id = parse_int_safe(parts[2]) if parts else None
+    
+    if event_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Restore the task
+    success = await repo.restore_completed_task(user_id=cb.from_user.id, event_id=event_id)
+    
+    if success:
+        await return_to_main_menu(
+            cb, repo, state=state, answer_text="Tehtävä palautettu aktiiviseksi", force_refresh=True
+        )
+    else:
+        # Task might already be active, deleted, or event not found
+        await cb.answer("Tehtävä on jo aktiivinen, poistettu, tai sitä ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
 
 
 @router.callback_query(F.data == "view:deleted")
@@ -129,6 +151,7 @@ async def cb_deleted_page(cb: CallbackQuery, state: FSMContext, repo: TasksRepo)
     
     if offset is None:
         await cb.answer("Virheellinen sivu.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     tasks = await repo.list_deleted_tasks(user_id=cb.from_user.id, limit=50, offset=offset)
@@ -143,25 +166,20 @@ async def cb_deleted_page(cb: CallbackQuery, state: FSMContext, repo: TasksRepo)
 @router.callback_query(F.data.startswith("deleted:restore:"))
 async def cb_restore_deleted(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Restore a deleted task"""
-    await state.clear()
     parts = parse_callback_data(cb.data, 3)
     event_id = parse_int_safe(parts[2]) if parts else None
     
     if event_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     success = await repo.restore_deleted_task(user_id=cb.from_user.id, event_id=event_id)
     if success:
-        tasks = await repo.list_deleted_tasks(user_id=cb.from_user.id, limit=50, offset=0)
-        if cb.message:
-            await cb.message.edit_text(
-                f"🗑 Poistetut tehtävät\n\nYhteensä: {len(tasks)} tehtävää\n\nKlikkaa tehtävää palauttaaksesi sen.",
-                reply_markup=deleted_tasks_kb(tasks, offset=0)
-            )
-        await cb.answer("Tehtävä palautettu")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä palautettu", force_refresh=True)
     else:
         await cb.answer("Tehtävää ei voitu palauttaa.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
 
 
 @router.callback_query(F.data == "view:stats")

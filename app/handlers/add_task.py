@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.db import TasksRepo
-from app.handlers.common import CtxKeys, Flow, _show_home_from_cb, _show_home_from_message
+from app.handlers.common import CtxKeys, Flow, return_to_main_menu
 from app.utils import parse_callback_data, parse_int_safe
 from app.ui import (
     add_task_category_kb,
@@ -115,8 +115,7 @@ async def cb_add_category(cb: CallbackQuery, state: FSMContext, repo: TasksRepo)
         difficulty=difficulty,
         category=category
     )
-    await state.clear()
-    await _show_home_from_cb(cb, repo, answer_text="Tehtävä lisätty", force_refresh=True)
+    await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä lisätty", force_refresh=True)
 
 
 @router.message(Flow.waiting_new_task_text)
@@ -144,8 +143,7 @@ async def msg_new_task(message: Message, state: FSMContext, repo: TasksRepo) -> 
         difficulty=5,
         category=''
     )
-    await state.clear()
-    await _show_home_from_message(message, repo)
+    await return_to_main_menu(message, repo, state=state)
 
 
 @router.message(Flow.waiting_task_difficulty_custom)
@@ -174,12 +172,12 @@ async def msg_custom_difficulty(message: Message, state: FSMContext, repo: Tasks
 async def msg_default_add_task(message: Message, state: FSMContext, repo: TasksRepo) -> None:
     """Default: any text message = new task (by default)"""
     if message.text and message.text.startswith("/"):
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
 
     text = (message.text or "").strip()
     if not text:
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
 
     # Add as regular task with defaults (priority parsed in add_task)
@@ -190,5 +188,4 @@ async def msg_default_add_task(message: Message, state: FSMContext, repo: TasksR
         difficulty=5,
         category=''
     )
-    await state.clear()
-    await _show_home_from_message(message, repo)
+    await return_to_main_menu(message, repo, state=state)

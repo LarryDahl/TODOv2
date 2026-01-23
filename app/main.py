@@ -5,6 +5,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import load_settings
 from app.db import TasksRepo
@@ -21,7 +22,8 @@ async def main() -> None:
     await repo.init()
 
     bot = Bot(token=settings.bot_token)
-    dp = Dispatcher()
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
 
     dp["repo"] = repo
     dp.include_router(router)

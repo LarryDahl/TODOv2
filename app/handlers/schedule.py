@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.db import TasksRepo
-from app.handlers.common import CtxKeys, Flow, _show_home_from_cb, _show_home_from_message
+from app.handlers.common import CtxKeys, Flow, return_to_main_menu
 from app.handlers.helpers import (
     handle_time_back_custom,
     save_schedule_at_time,
@@ -39,11 +39,13 @@ async def cb_schedule_start(cb: CallbackQuery, state: FSMContext, repo: TasksRep
     
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
     if not task:
         await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     await state.set_state(Flow.waiting_schedule_type)
@@ -72,8 +74,7 @@ async def cb_schedule_type(cb: CallbackQuery, state: FSMContext, repo: TasksRepo
     
     if schedule_type == "none":
         await repo.clear_schedule(task_id=task_id, user_id=cb.from_user.id)
-        await state.clear()
-        await _show_home_from_cb(cb, repo, answer_text="Aikataulu poistettu")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Aikataulu poistettu", force_refresh=True)
         return
     
     await state.update_data({CtxKeys.schedule_kind: schedule_type})
@@ -112,10 +113,10 @@ async def cb_schedule_date(cb: CallbackQuery, state: FSMContext, repo: TasksRepo
         schedule_payload = {"date": date_dt.strftime("%Y-%m-%d")}
         success = await repo.set_schedule(task_id=task_id, user_id=cb.from_user.id, schedule_kind="all_day", schedule_payload=schedule_payload)
         if success:
-            await state.clear()
-            await _show_home_from_cb(cb, repo, answer_text="Aikataulu asetettu")
+            await return_to_main_menu(cb, repo, state=state, answer_text="Aikataulu asetettu", force_refresh=True)
         else:
             await cb.answer("Virhe: aikataulua ei voitu asettaa.", show_alert=True)
+            await return_to_main_menu(cb, repo, state=state)
         return
     
     if schedule_kind == "at_time":
@@ -246,8 +247,7 @@ async def msg_schedule_custom_time(message: Message, state: FSMContext, repo: Ta
     date_offset = data.get(CtxKeys.schedule_date_offset)
     
     if not isinstance(task_id, int) or date_offset is None:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
     date_dt = get_date_offset_days(date_offset)
@@ -255,10 +255,10 @@ async def msg_schedule_custom_time(message: Message, state: FSMContext, repo: Ta
     
     success = await repo.set_schedule(task_id=task_id, user_id=message.from_user.id, schedule_kind="at_time", schedule_payload=schedule_payload)
     if success:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
     else:
         await message.answer("Virhe: aikataulua ei voitu asettaa.")
+        await return_to_main_menu(message, repo, state=state)
 
 
 @router.message(Flow.waiting_schedule_time_range_start)
@@ -276,8 +276,7 @@ async def msg_schedule_start_custom(message: Message, state: FSMContext, repo: T
     date_offset = data.get(CtxKeys.schedule_date_offset)
     
     if not isinstance(task_id, int) or date_offset is None:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
     await state.update_data({CtxKeys.schedule_start_time: time_str})
@@ -302,8 +301,7 @@ async def msg_schedule_end_custom(message: Message, state: FSMContext, repo: Tas
     start_time = data.get(CtxKeys.schedule_start_time)
     
     if not isinstance(task_id, int) or date_offset is None or not start_time:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
     date_dt = get_date_offset_days(date_offset)
@@ -314,10 +312,10 @@ async def msg_schedule_end_custom(message: Message, state: FSMContext, repo: Tas
     
     success = await repo.set_schedule(task_id=task_id, user_id=message.from_user.id, schedule_kind="time_range", schedule_payload=schedule_payload)
     if success:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
     else:
         await message.answer("Virhe: aikataulua ei voitu asettaa.")
+        await return_to_main_menu(message, repo, state=state)
 
 
 # Schedule flow for adding new tasks
@@ -356,8 +354,7 @@ async def cb_add_scheduled_time(cb: CallbackQuery, state: FSMContext, repo: Task
     
     if date_offset is None:
         await cb.answer("Virhe: tietoja puuttuu.", show_alert=True)
-        await state.clear()
-        await _show_home_from_cb(cb, repo)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     if time_option == "back":
@@ -392,8 +389,7 @@ async def msg_add_scheduled_custom_time(message: Message, state: FSMContext, rep
     date_offset = data.get(CtxKeys.add_scheduled_date_offset)
     
     if date_offset is None:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
     date_dt = get_date_offset_days(date_offset)
@@ -413,5 +409,4 @@ async def msg_add_scheduled_custom_time(message: Message, state: FSMContext, rep
     )
     
     await repo.set_schedule(task_id=task_id, user_id=message.from_user.id, schedule_kind="at_time", schedule_payload=schedule_payload)
-    await state.clear()
-    await _show_home_from_message(message, repo)
+    await return_to_main_menu(message, repo, state=state)

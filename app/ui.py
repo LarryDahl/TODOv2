@@ -62,6 +62,9 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
         width=3,
     )
     
+    # Suggestions button
+    kb.row(InlineKeyboardButton(text="Ehdotukset", callback_data="view:suggestions"))
+    
     return kb.as_markup()
 
 
@@ -74,7 +77,7 @@ def settings_kb() -> InlineKeyboardMarkup:
 
 
 def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
-    """Edit view: list of tasks only (click task to open action menu)"""
+    """Edit view: list of tasks (click task to open edit menu)"""
     kb = InlineKeyboardBuilder()
     
     for task in tasks:
@@ -82,11 +85,11 @@ def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
         rendered_title = render_title_with_priority(task.text, task.priority)
         task_text = _label(rendered_title, 48)
         
-        # Task title button (opens action menu)
+        # Task title button (opens edit menu)
         kb.row(
             InlineKeyboardButton(
                 text=task_text,
-                callback_data=f"task:menu:{task.id}",
+                callback_data=f"task:edit_menu:{task.id}",
             )
         )
     
@@ -106,6 +109,44 @@ def task_action_kb(task: Task) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="⏰ Lisää deadline", callback_data=f"task:deadline:{task.id}"))
     kb.row(InlineKeyboardButton(text="🗓 Lisää schedule", callback_data=f"task:schedule:{task.id}"))
     kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:edit"))
+    
+    return kb.as_markup()
+
+
+def task_edit_menu_kb(task: Task) -> InlineKeyboardMarkup:
+    """Edit menu for a task with quick actions"""
+    kb = InlineKeyboardBuilder()
+    
+    # Main actions
+    kb.row(InlineKeyboardButton(text="✏️ Muuta tekstiä", callback_data=f"task:edit_text:{task.id}"))
+    
+    # Priority actions
+    kb.row(
+        InlineKeyboardButton(text="⬆️ Nosta prioriteettia", callback_data=f"task:priority_up:{task.id}"),
+        InlineKeyboardButton(text="⬇️ Laske prioriteettia", callback_data=f"task:priority_down:{task.id}"),
+        width=2,
+    )
+    
+    # Deadline quick actions
+    has_deadline = bool(task.deadline)
+    if has_deadline:
+        kb.row(
+            InlineKeyboardButton(text="⏰ DL +1h", callback_data=f"task:dl_plus1h:{task.id}"),
+            InlineKeyboardButton(text="⏰ DL +24h", callback_data=f"task:dl_plus24h:{task.id}"),
+            width=2,
+        )
+        kb.row(InlineKeyboardButton(text="❌ Poista DL", callback_data=f"task:dl_remove:{task.id}"))
+    else:
+        kb.row(
+            InlineKeyboardButton(text="⏰ DL +1h", callback_data=f"task:dl_plus1h:{task.id}"),
+            InlineKeyboardButton(text="⏰ DL +24h", callback_data=f"task:dl_plus24h:{task.id}"),
+            width=2,
+        )
+    
+    # Delete action
+    kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"))
+    
     kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:edit"))
     
     return kb.as_markup()
@@ -196,7 +237,17 @@ def render_settings_header() -> str:
 
 
 def render_edit_header() -> str:
-    return "Muokkaa tehtäviä\n\nValitse tehtävä nähdäksesi toimintovaihtoehdot."
+    return "Muokkaa tehtäviä\n\nValitse tehtävä nähdäksesi muokkausvaihtoehdot."
+
+
+def render_task_edit_menu_header(task: Task) -> str:
+    """Render header for task edit menu"""
+    rendered_title = render_title_with_priority(task.text, task.priority)
+    deadline_info = ""
+    if task.deadline:
+        from app.ui import _format_task_date
+        deadline_info = f"\n⏰ Määräaika: {_format_task_date(task.deadline)}"
+    return f"Muokkaa tehtävää\n\n{rendered_title}{deadline_info}\n\nValitse toiminto:"
 
 
 def render_stats_header(stats: dict) -> str:
@@ -304,7 +355,7 @@ def _format_task_date(iso_str: str) -> str:
 
 
 def done_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
-    """Done tasks view keyboard with pagination."""
+    """Done tasks view keyboard with restore buttons and pagination."""
     kb = InlineKeyboardBuilder()
     
     for task in tasks:
@@ -312,7 +363,13 @@ def done_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
         date_str = _format_task_date(task.get('updated_at', ''))
         display_text = f"✓ {task_text}" + (f" ({date_str})" if date_str else "")
         
-        kb.row(InlineKeyboardButton(text=display_text, callback_data="noop"))
+        event_id = task.get('job_id')  # event_id from task_events
+        if event_id:
+            # Clicking task restores it to active
+            kb.row(InlineKeyboardButton(text=display_text, callback_data=f"done:restore:{event_id}"))
+        else:
+            # Fallback if no event_id
+            kb.row(InlineKeyboardButton(text=display_text, callback_data="noop"))
     
     if len(tasks) >= 50:
         kb.row(InlineKeyboardButton(text="📄 Näytä lisää", callback_data=f"done:page:{offset + 50}"))
@@ -339,3 +396,45 @@ def deleted_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup
     
     kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
     return kb.as_markup()
+
+
+def suggestions_kb(suggestions: list[dict]) -> InlineKeyboardMarkup:
+    """Suggestions view keyboard with accept/snooze buttons"""
+    kb = InlineKeyboardBuilder()
+    
+    for suggestion in suggestions:
+        task_text = _label(suggestion.get('text', ''), 40)
+        priority = suggestion.get('priority', 0)
+        
+        # Render with priority indicators
+        rendered_title = render_title_with_priority(task_text, priority)
+        display_text = _label(rendered_title, 40)
+        
+        # Row: task title (non-clickable display) + action buttons
+        event_id = suggestion.get('event_id')
+        if event_id:
+            kb.row(
+                InlineKeyboardButton(
+                    text=display_text,
+                    callback_data="noop"  # Display only
+                )
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text="✅ Lisää tehtävälistaan",
+                    callback_data=f"suggestion:accept:{event_id}"
+                ),
+                InlineKeyboardButton(
+                    text="⏸ Snooze",
+                    callback_data=f"suggestion:snooze:{event_id}"
+                ),
+                width=2,
+            )
+    
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def render_suggestions_header(count: int) -> str:
+    """Render suggestions view header"""
+    return f"💡 Ehdotukset\n\n{count} ehdotusta backlogista.\n\nValitse 'Lisää tehtävälistaan' lisätäksesi tehtävän takaisin listalle."

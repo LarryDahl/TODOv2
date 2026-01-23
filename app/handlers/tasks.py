@@ -7,8 +7,9 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from app.clock import SystemClock
 from app.db import TasksRepo
-from app.handlers.common import CtxKeys, Flow, _show_home_from_cb, _show_home_from_message
+from app.handlers.common import CtxKeys, Flow, return_to_main_menu
 from app.priority import parse_priority, render_title_with_priority
 from app.utils import parse_callback_data, parse_int_safe
 
@@ -17,47 +18,118 @@ router = Router()
 
 @router.callback_query(F.data.startswith("completed:restore:"))
 async def cb_restore_completed(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    await state.clear()
+    from app.handlers.common import return_to_main_menu
+    
     parts = parse_callback_data(cb.data, 3)
     event_id = parse_int_safe(parts[2]) if parts else None
     
     if event_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     success = await repo.restore_completed_task(user_id=cb.from_user.id, event_id=event_id)
     if success:
-        await _show_home_from_cb(cb, repo, answer_text="Tehtävä palautettu listalle")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä palautettu listalle", force_refresh=True)
     else:
         await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
 
 
 @router.callback_query(F.data.startswith("task:done:"))
 async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    await state.clear()
+    from app.handlers.common import return_to_main_menu
+    
     parts = parse_callback_data(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
 
-    await repo.complete_task(user_id=cb.from_user.id, task_id=task_id)
-    await _show_home_from_cb(cb, repo)
+    success = await repo.complete_task(user_id=cb.from_user.id, task_id=task_id)
+    if success:
+        await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä merkitty tehdyksi", force_refresh=True)
+    else:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
 
 
 @router.callback_query(F.data.startswith("task:del:"))
 async def cb_delete(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    await state.clear()
+    """Start delete flow - prompt user for deletion reason"""
     parts = parse_callback_data(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
+    
+    # Check if task exists and belongs to user
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt tai se on jo poistettu.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Store task_id in state and prompt for reason
+    await state.update_data({CtxKeys.delete_task_id: task_id})
+    await state.set_state(Flow.waiting_delete_reason)
+    
+    if cb.message:
+        task_title = render_title_with_priority(task.text, task.priority)
+        await cb.message.edit_text(
+            f"Poista tehtävä:\n\n{task_title}\n\n"
+            f"Kirjoita poiston syy (valinnainen).\n"
+            f"Lähetä tyhjä viesti tai '/peruuta' peruuttaaksesi."
+        )
+    await cb.answer()
 
-    await repo.delete_task_with_log(user_id=cb.from_user.id, task_id=task_id)
-    await _show_home_from_cb(cb, repo)
+
+@router.message(Flow.waiting_delete_reason)
+async def msg_delete_reason(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle delete reason submission or cancellation"""
+    from app.handlers.common import return_to_main_menu
+    
+    text = (message.text or "").strip()
+    
+    # Handle cancellation: /peruuta or /cancel
+    if text.lower() in ("/peruuta", "/cancel", "/peru"):
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    data = await state.get_data()
+    task_id = data.get(CtxKeys.delete_task_id)
+    
+    if not isinstance(task_id, int):
+        await message.answer("Virhe: tehtävä-id puuttuu.")
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    # Double-check task still exists (guard against race conditions)
+    task = await repo.get_task(user_id=message.from_user.id, task_id=task_id)
+    if not task:
+        await message.answer("Tehtävää ei löytynyt tai se on jo poistettu.")
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    # Use text as reason (empty string if user sent empty message)
+    reason = text if text else ""
+    
+    # Delete task with reason
+    success = await repo.delete_task_with_log(
+        user_id=message.from_user.id,
+        task_id=task_id,
+        reason=reason
+    )
+    
+    if success:
+        await return_to_main_menu(message, repo, state=state)
+    else:
+        await message.answer("Tehtävää ei voitu poistaa.")
+        await return_to_main_menu(message, repo, state=state)
 
 
 @router.callback_query(F.data.startswith("task:menu:"))
@@ -70,11 +142,13 @@ async def cb_task_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
     if not task:
         await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     if cb.message:
@@ -86,18 +160,48 @@ async def cb_task_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("task:edit:"))
-async def cb_edit(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+@router.callback_query(F.data.startswith("task:edit_menu:"))
+async def cb_edit_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show edit menu for a task"""
+    from app.ui import task_edit_menu_kb, render_task_edit_menu_header
+    
     parts = parse_callback_data(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
     if not task:
         await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    if cb.message:
+        await cb.message.edit_text(
+            render_task_edit_menu_header(task),
+            reply_markup=task_edit_menu_kb(task)
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:edit_text:"))
+async def cb_edit_text(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Start edit task text flow - prompt user for new text"""
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts else None
+    
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     await state.update_data({CtxKeys.edit_task_id: task_id})
@@ -106,16 +210,24 @@ async def cb_edit(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
     if cb.message:
         task_title = render_title_with_priority(task.text, task.priority)
         await cb.message.edit_text(
-            f"Muokkaa tehtävää:\n\nNykyinen: {task_title}\n\nKirjoita uusi teksti viestinä."
+            f"Muokkaa tehtävää:\n\nNykyinen: {task_title}\n\n"
+            f"Kirjoita uusi teksti viestinä.\n"
+            f"(Voit käyttää '!' merkkejä prioriteetin asettamiseen, esim. 'Tehtävä!!!' = prioriteetti 3)\n\n"
+            f"Lähetä tyhjä viesti tai '/peruuta' peruuttaaksesi."
         )
     await cb.answer()
 
 
 @router.message(Flow.waiting_edit_task_text)
 async def msg_edit_task(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle task edit submission or cancellation"""
+    from app.handlers.common import return_to_main_menu
+    
     text = (message.text or "").strip()
-    if not text:
-        await message.answer("Tehtävän teksti ei voi olla tyhjä.")
+    
+    # Handle cancellation: empty text or /peruuta or /cancel
+    if not text or text.lower() in ("/peruuta", "/cancel", "/peru"):
+        await return_to_main_menu(message, repo, state=state)
         return
     
     data = await state.get_data()
@@ -123,20 +235,227 @@ async def msg_edit_task(message: Message, state: FSMContext, repo: TasksRepo) ->
     
     if not isinstance(task_id, int):
         await message.answer("Virhe: tehtävä-id puuttuu.")
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
-    # Parse priority from text
-    clean_text, priority = parse_priority(text)
+    # Verify task still exists and belongs to user (safety check)
+    task = await repo.get_task(user_id=message.from_user.id, task_id=task_id)
+    if not task:
+        await message.answer("Tehtävää ei löytynyt tai se on jo poistettu.")
+        await return_to_main_menu(message, repo, state=state)
+        return
     
-    # Update task
-    await repo.update_task(
+    # Update task in database (priority is parsed automatically from text in update_task)
+    success = await repo.update_task(
         user_id=message.from_user.id,
         task_id=task_id,
-        new_text=clean_text,
-        priority=priority
+        new_text=text
     )
     
-    await state.clear()
-    await _show_home_from_message(message, repo)
+    if success:
+        await return_to_main_menu(message, repo, state=state, force_refresh=True)
+    else:
+        await message.answer("Virhe: tehtävää ei voitu päivittää.")
+        await return_to_main_menu(message, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("task:priority_up:"))
+async def cb_priority_up(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Increase task priority by 1"""
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts else None
+    
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Verify task exists
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Update priority
+    success = await repo.update_task_meta(
+        user_id=cb.from_user.id,
+        task_id=task_id,
+        patch={'increment_priority': True}
+    )
+    
+    if success:
+        await return_to_main_menu(
+            cb, repo, state=state, answer_text="Prioriteetti nostettu", force_refresh=True
+        )
+    else:
+        await cb.answer("Virhe: prioriteettia ei voitu päivittää.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("task:priority_down:"))
+async def cb_priority_down(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Decrease task priority by 1"""
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts else None
+    
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Verify task exists
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Update priority
+    success = await repo.update_task_meta(
+        user_id=cb.from_user.id,
+        task_id=task_id,
+        patch={'decrement_priority': True}
+    )
+    
+    if success:
+        await return_to_main_menu(
+            cb, repo, state=state, answer_text="Prioriteetti laskettu", force_refresh=True
+        )
+    else:
+        await cb.answer("Virhe: prioriteettia ei voitu päivittää.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("task:dl_plus1h:"))
+async def cb_dl_plus1h(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Set or push deadline by +1 hour from now (Helsinki time)"""
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts else None
+    
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Verify task exists
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Calculate new deadline: +1 hour from now (Helsinki time, stored as UTC)
+    new_deadline = SystemClock.add_hours_helsinki(1)
+    
+    # If task already has deadline, use the later of (current deadline, new deadline)
+    if task.deadline:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            current_deadline = datetime.fromisoformat(task.deadline.replace('Z', '+00:00'))
+            new_deadline_dt = datetime.fromisoformat(new_deadline.replace('Z', '+00:00'))
+            # Use the later deadline
+            if current_deadline > new_deadline_dt:
+                new_deadline = task.deadline
+        except (ValueError, AttributeError):
+            pass  # Use new_deadline if parsing fails
+    
+    # Update deadline
+    success = await repo.update_task_meta(
+        user_id=cb.from_user.id,
+        task_id=task_id,
+        patch={'deadline': new_deadline}
+    )
+    
+    if success:
+        await return_to_main_menu(
+            cb, repo, state=state, answer_text="Määräaika asetettu +1h", force_refresh=True
+        )
+    else:
+        await cb.answer("Virhe: määräaikaa ei voitu päivittää.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("task:dl_plus24h:"))
+async def cb_dl_plus24h(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Set or push deadline by +24 hours from now (Helsinki time)"""
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts else None
+    
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Verify task exists
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Calculate new deadline: +24 hours from now (Helsinki time, stored as UTC)
+    new_deadline = SystemClock.add_hours_helsinki(24)
+    
+    # If task already has deadline, use the later of (current deadline, new deadline)
+    if task.deadline:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            current_deadline = datetime.fromisoformat(task.deadline.replace('Z', '+00:00'))
+            new_deadline_dt = datetime.fromisoformat(new_deadline.replace('Z', '+00:00'))
+            # Use the later deadline
+            if current_deadline > new_deadline_dt:
+                new_deadline = task.deadline
+        except (ValueError, AttributeError):
+            pass  # Use new_deadline if parsing fails
+    
+    # Update deadline
+    success = await repo.update_task_meta(
+        user_id=cb.from_user.id,
+        task_id=task_id,
+        patch={'deadline': new_deadline}
+    )
+    
+    if success:
+        await return_to_main_menu(
+            cb, repo, state=state, answer_text="Määräaika asetettu +24h", force_refresh=True
+        )
+    else:
+        await cb.answer("Virhe: määräaikaa ei voitu päivittää.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("task:dl_remove:"))
+async def cb_dl_remove(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Remove deadline from task"""
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts else None
+    
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Verify task exists
+    task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
+    if not task:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Remove deadline
+    success = await repo.update_task_meta(
+        user_id=cb.from_user.id,
+        task_id=task_id,
+        patch={'deadline': None}
+    )
+    
+    if success:
+        await return_to_main_menu(
+            cb, repo, state=state, answer_text="Määräaika poistettu", force_refresh=True
+        )
+    else:
+        await cb.answer("Virhe: määräaikaa ei voitu poistaa.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
