@@ -30,7 +30,9 @@ def parse_priority(text: str) -> tuple[str, int]:
         >>> parse_priority("Normal task")
         ('Normal task', 0)
         >>> parse_priority("Task with! middle!")
-        ('Task with! middle', 0)  # Only trailing ! count
+        ('Task with! middle', 1)  # Trailing ! counts
+        >>> parse_priority("Task !")
+        ('Task', 1)  # Space before ! still counts
     """
     # Strip leading/trailing whitespace for safe handling
     text = text.strip()

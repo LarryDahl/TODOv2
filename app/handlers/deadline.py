@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.db import TasksRepo
-from app.handlers.common import CtxKeys, Flow, _show_home_from_cb, _show_home_from_message
+from app.handlers.common import CtxKeys, Flow, return_to_main_menu
 from app.handlers.helpers import handle_time_back_custom, save_deadline_from_time, validate_required_fields
 from app.priority import render_title_with_priority
 from app.utils import (
@@ -34,11 +34,13 @@ async def cb_deadline_start(cb: CallbackQuery, state: FSMContext, repo: TasksRep
     
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     task = await repo.get_task(user_id=cb.from_user.id, task_id=task_id)
     if not task:
         await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     await state.set_state(Flow.waiting_deadline_date)
@@ -70,8 +72,7 @@ async def cb_deadline_date(cb: CallbackQuery, state: FSMContext, repo: TasksRepo
     
     if date_option == "none":
         await repo.clear_deadline(task_id=task_id, user_id=cb.from_user.id)
-        await state.clear()
-        await _show_home_from_cb(cb, repo, answer_text="Määräaika poistettu")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Määräaika poistettu", force_refresh=True)
         return
     
     date_offset = parse_int_safe(date_option)
@@ -140,8 +141,7 @@ async def msg_deadline_custom_time(message: Message, state: FSMContext, repo: Ta
     date_offset = data.get(CtxKeys.deadline_date_offset)
     
     if not isinstance(task_id, int) or date_offset is None:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
     date_dt = get_date_offset_days(date_offset)
@@ -149,10 +149,10 @@ async def msg_deadline_custom_time(message: Message, state: FSMContext, repo: Ta
     
     success = await repo.set_deadline(task_id=task_id, user_id=message.from_user.id, deadline_utc=deadline_iso)
     if success:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
     else:
         await message.answer("Virhe: määräaikaa ei voitu asettaa.")
+        await return_to_main_menu(message, repo, state=state)
 
 
 # Deadline flow for adding new tasks
@@ -188,8 +188,7 @@ async def cb_add_deadline_time(cb: CallbackQuery, state: FSMContext, repo: Tasks
     
     if date_offset is None or not time_option:
         await cb.answer("Virhe: tietoja puuttuu.", show_alert=True)
-        await state.clear()
-        await _show_home_from_cb(cb, repo)
+        await return_to_main_menu(cb, repo, state=state)
         return
     
     if time_option == "back":
@@ -222,8 +221,7 @@ async def msg_add_deadline_custom_time(message: Message, state: FSMContext, repo
     date_offset = data.get(CtxKeys.add_deadline_date_offset)
     
     if date_offset is None:
-        await state.clear()
-        await _show_home_from_message(message, repo)
+        await return_to_main_menu(message, repo, state=state)
         return
     
     task_text = data.get(CtxKeys.add_task_text)
@@ -242,5 +240,4 @@ async def msg_add_deadline_custom_time(message: Message, state: FSMContext, repo
         category=data.get(CtxKeys.add_task_category, ''),
         deadline=deadline_iso
     )
-    await state.clear()
-    await _show_home_from_message(message, repo)
+    await return_to_main_menu(message, repo, state=state)

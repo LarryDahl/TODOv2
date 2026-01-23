@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from app.db import TasksRepo
-from app.handlers.common import _show_home_from_cb
+from app.handlers.common import return_to_main_menu
 from app.utils import combine_date_time, format_datetime_iso, get_date_offset_days, parse_time_string
 
 
@@ -25,8 +25,7 @@ async def validate_required_fields(
         value = data.get(key)
         if value is None or (expected_type is not None and not isinstance(value, expected_type)):
             await cb.answer("Virhe: tietoja puuttuu.", show_alert=True)
-            await state.clear()
-            await _show_home_from_cb(cb, repo)
+            await return_to_main_menu(cb, repo, state=state)
             return None
     return data
 
@@ -77,11 +76,11 @@ async def save_deadline_from_time(
     
     success = await repo.set_deadline(task_id=task_id, user_id=cb.from_user.id, deadline_utc=deadline_iso)
     if success:
-        await state.clear()
-        await _show_home_from_cb(cb, repo, answer_text="Määräaika asetettu")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Määräaika asetettu", force_refresh=True)
         return True
     else:
         await cb.answer("Virhe: määräaikaa ei voitu asettaa.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return False
 
 
@@ -103,11 +102,11 @@ async def save_schedule_at_time(
     
     success = await repo.set_schedule(task_id=task_id, user_id=cb.from_user.id, schedule_kind="at_time", schedule_payload=schedule_payload)
     if success:
-        await state.clear()
-        await _show_home_from_cb(cb, repo, answer_text="Aikataulu asetettu")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Aikataulu asetettu", force_refresh=True)
         return True
     else:
         await cb.answer("Virhe: aikataulua ei voitu asettaa.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return False
 
 
@@ -133,11 +132,11 @@ async def save_schedule_time_range(
     
     success = await repo.set_schedule(task_id=task_id, user_id=cb.from_user.id, schedule_kind="time_range", schedule_payload=schedule_payload)
     if success:
-        await state.clear()
-        await _show_home_from_cb(cb, repo, answer_text="Aikataulu asetettu")
+        await return_to_main_menu(cb, repo, state=state, answer_text="Aikataulu asetettu", force_refresh=True)
         return True
     else:
         await cb.answer("Virhe: aikataulua ei voitu asettaa.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
         return False
 
 
@@ -172,8 +171,7 @@ async def add_task_with_deadline(
         category=data.get(CtxKeys.add_task_category, ''),
         deadline=deadline_iso
     )
-    await state.clear()
-    await _show_home_from_cb(cb, repo, answer_text="Tehtävä lisätty", force_refresh=True)
+    await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä lisätty", force_refresh=True)
     return True
 
 
@@ -209,6 +207,5 @@ async def add_task_with_schedule(
     )
     
     await repo.set_schedule(task_id=task_id, user_id=cb.from_user.id, schedule_kind="at_time", schedule_payload=schedule_payload)
-    await state.clear()
-    await _show_home_from_cb(cb, repo, answer_text="Tehtävä lisätty", force_refresh=True)
+    await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä lisätty", force_refresh=True)
     return True

@@ -33,6 +33,8 @@ class Flow(StatesGroup):
     waiting_schedule_time_range_start = State()
     waiting_schedule_time_range_end = State()
     waiting_schedule_custom_time = State()
+    # Delete flow state
+    waiting_delete_reason = State()
 
 
 @dataclass(frozen=True)
@@ -58,10 +60,15 @@ class CtxKeys:
     schedule_date_offset: str = "schedule_date_offset"
     schedule_time: str = "schedule_time"
     schedule_start_time: str = "schedule_start_time"
+    # Delete flow keys
+    delete_task_id: str = "delete_task_id"
 
 
-async def _show_home_from_message(message: Message, repo: TasksRepo) -> None:
-    """Show default home view from message"""
+async def _show_home_from_message(message: Message, repo: TasksRepo, state: FSMContext | None = None) -> None:
+    """Show default home view from message. Always clears state and returns to main menu."""
+    if state:
+        await state.clear()
+    
     completed = await repo.list_completed_tasks(user_id=message.from_user.id, limit=3)
     active = await repo.list_tasks(user_id=message.from_user.id, limit=7)
     daily_progress = await repo.get_daily_progress(user_id=message.from_user.id)
@@ -74,9 +81,18 @@ async def _show_home_from_message(message: Message, repo: TasksRepo) -> None:
     await message.answer(header_text, reply_markup=default_kb(completed, active))
 
 
-async def _show_home_from_cb(cb: CallbackQuery, repo: TasksRepo, answer_text: str | None = None, force_refresh: bool = False) -> None:
-    """Show default home view from callback"""
+async def _show_home_from_cb(
+    cb: CallbackQuery, 
+    repo: TasksRepo, 
+    state: FSMContext | None = None,
+    answer_text: str | None = None, 
+    force_refresh: bool = False
+) -> None:
+    """Show default home view from callback. Always clears state, answers callback, and returns to main menu."""
     from aiogram.exceptions import TelegramBadRequest
+    
+    if state:
+        await state.clear()
     
     completed = await repo.list_completed_tasks(user_id=cb.from_user.id, limit=3)
     active = await repo.list_tasks(user_id=cb.from_user.id, limit=7)
@@ -109,8 +125,36 @@ async def _show_home_from_cb(cb: CallbackQuery, repo: TasksRepo, answer_text: st
         except Exception:
             pass  # Ignore other errors and just answer
     
-    # Answer callback - use provided text or default
+    # Always answer callback - use provided text or default
     if answer_text:
         await cb.answer(answer_text)
     else:
         await cb.answer()
+
+
+async def return_to_main_menu(
+    cb: CallbackQuery | Message,
+    repo: TasksRepo,
+    state: FSMContext | None = None,
+    answer_text: str | None = None,
+    force_refresh: bool = False
+) -> None:
+    """
+    Unified function to return to main menu after any operation.
+    Handles both CallbackQuery and Message, always clears state, answers callbacks.
+    
+    Args:
+        cb: CallbackQuery or Message
+        repo: TasksRepo instance
+        state: Optional FSMContext to clear
+        answer_text: Optional text for callback answer
+        force_refresh: Whether to force refresh the message
+    """
+    from aiogram.types import CallbackQuery, Message
+    
+    if isinstance(cb, CallbackQuery):
+        await _show_home_from_cb(cb, repo, state=state, answer_text=answer_text, force_refresh=force_refresh)
+    elif isinstance(cb, Message):
+        await _show_home_from_message(cb, repo, state=state)
+    else:
+        raise TypeError(f"Expected CallbackQuery or Message, got {type(cb)}")
