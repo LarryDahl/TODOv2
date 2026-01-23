@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import aiosqlite
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.priority import parse_priority
+from app.priority_compute import compute_priority
 
 
 @dataclass(frozen=True)
@@ -16,10 +18,12 @@ class Task:
     task_type: str  # 'deadline', 'scheduled', 'regular'
     difficulty: int  # percentage (1, 5, 10, or custom)
     category: str  # 'liikunta', 'arki', 'opiskelu', 'suhteet', 'muu', ''
-    deadline: Optional[str]  # ISO datetime for deadline tasks
-    scheduled_time: Optional[str]  # ISO datetime for scheduled tasks
+    deadline: Optional[str]  # ISO datetime for deadline (latest-by), UTC
+    scheduled_time: Optional[str]  # ISO datetime for scheduled tasks (deprecated, use schedule_kind/schedule_json)
     priority: int  # 0 to 5, derived from trailing '!' in title
     priority_source: str  # 'bang_suffix' or future AI-based sources
+    schedule_kind: Optional[str]  # 'none' | 'at_time' | 'time_range' | 'all_day' | None
+    schedule_json: Optional[str]  # JSON string with schedule details
     created_at: str
     updated_at: str
 
@@ -50,6 +54,8 @@ class TasksRepo:
                     scheduled_time TEXT,
                     priority INTEGER NOT NULL DEFAULT 0,
                     priority_source TEXT NOT NULL DEFAULT 'bang_suffix',
+                    schedule_kind TEXT,
+                    schedule_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -71,6 +77,10 @@ class TasksRepo:
                 await db.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;")
             if 'priority_source' not in columns:
                 await db.execute("ALTER TABLE tasks ADD COLUMN priority_source TEXT NOT NULL DEFAULT 'bang_suffix';")
+            if 'schedule_kind' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN schedule_kind TEXT;")
+            if 'schedule_json' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN schedule_json TEXT;")
             
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);")
 
@@ -92,21 +102,21 @@ class TasksRepo:
     async def list_tasks(self, user_id: int, limit: int = 50) -> list[Task]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
+            # Fetch all tasks to ensure consistent sorting across different views
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at
                 FROM tasks
-                WHERE user_id = ?
-                ORDER BY priority DESC, 
-                         CASE WHEN deadline IS NULL THEN 1 ELSE 0 END,
-                         deadline ASC,
-                         created_at ASC
-                LIMIT ?;
+                WHERE user_id = ?;
                 """,
-                (user_id, limit),
+                (user_id,),
             )
-            rows = await cur.fetchall()
-            return [Task(**dict(r)) for r in rows]
+            tasks = [Task(**dict(r)) for r in await cur.fetchall()]
+            
+            # Sort by computed priority
+            now = datetime.now(timezone.utc)
+            tasks.sort(key=lambda t: compute_priority(t, now), reverse=True)
+            return tasks[:limit]
     
     async def list_completed_tasks(self, user_id: int, limit: int = 3) -> list[dict]:
         """Get most recently completed tasks"""
@@ -124,6 +134,38 @@ class TasksRepo:
             )
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
+    
+    async def _list_event_tasks(self, user_id: int, action: str, limit: int, offset: int) -> list[dict]:
+        """Helper to list tasks from events (done/deleted)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT 
+                    e.id as job_id,
+                    e.task_id,
+                    e.text as title,
+                    NULL as due_at,
+                    NULL as schedule_kind,
+                    NULL as schedule_json,
+                    ? as status,
+                    e.at as updated_at
+                FROM task_events e
+                WHERE e.user_id = ? AND e.action = ?
+                ORDER BY e.at DESC
+                LIMIT ? OFFSET ?;
+                """,
+                (action, user_id, action, limit, offset),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def list_done_tasks(self, user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+        """List completed tasks with deadline and schedule metadata."""
+        return await self._list_event_tasks(user_id, 'completed', limit, offset)
+    
+    async def list_deleted_tasks(self, user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+        """List deleted (cancelled) tasks with deadline and schedule metadata."""
+        return await self._list_event_tasks(user_id, 'deleted', limit, offset)
 
     async def add_task(
         self, 
@@ -141,10 +183,10 @@ class TasksRepo:
         async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', now, now),
+                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', None, None, now, now),
             )
             await db.commit()
             return int(cur.lastrowid)
@@ -154,7 +196,7 @@ class TasksRepo:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ? AND id = ?;
                 """,
@@ -235,8 +277,8 @@ class TasksRepo:
             now = self._now_iso()
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     user_id,
@@ -248,6 +290,8 @@ class TasksRepo:
                     original_task.scheduled_time if original_task else None,
                     priority,
                     'bang_suffix',
+                    original_task.schedule_kind if original_task else None,
+                    original_task.schedule_json if original_task else None,
                     now,
                     now
                 ),
@@ -278,6 +322,66 @@ class TasksRepo:
             )
             row = await cur.fetchone()
             return dict(row) if row else None
+    
+    async def restore_deleted_task(self, user_id: int, event_id: int) -> bool:
+        """Restore a deleted task back to the task list using event id"""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Get the deleted task event
+            cur = await db.execute(
+                """
+                SELECT id, task_id, text, at
+                FROM task_events
+                WHERE user_id = ? AND action = 'deleted' AND id = ?;
+                """,
+                (user_id, event_id),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return False
+            
+            # Try to get original task data if task_id exists (might be None if task was already deleted)
+            original_task = None
+            if row['task_id']:
+                # Task is already deleted, so we can't get it from tasks table
+                # We'll restore with defaults and user can edit if needed
+                pass
+            
+            # Add task back with original data or defaults
+            # Re-parse priority from text when restoring
+            restore_text = row['text']
+            clean_title, priority = parse_priority(restore_text)
+            now = self._now_iso()
+            cur = await db.execute(
+                """
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    user_id,
+                    clean_title,
+                    original_task.task_type if original_task else 'regular',
+                    original_task.difficulty if original_task else 5,
+                    original_task.category if original_task else '',
+                    original_task.deadline if original_task else None,
+                    original_task.scheduled_time if original_task else None,
+                    priority,
+                    'bang_suffix',
+                    original_task.schedule_kind if original_task else None,
+                    original_task.schedule_json if original_task else None,
+                    now,
+                    now
+                ),
+            )
+            
+            # Remove the deleted event so it disappears from deleted tasks list
+            await db.execute(
+                "DELETE FROM task_events WHERE id = ?;",
+                (event_id,),
+            )
+            
+            await db.commit()
+            return True
     
     async def get_statistics(self, user_id: int, days: int) -> dict:
         """Get statistics for the last N days"""
@@ -362,6 +466,111 @@ class TasksRepo:
             cur = await db.execute(
                 "DELETE FROM tasks WHERE user_id = ? AND id = ?;",
                 (user_id, task_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def set_deadline(self, task_id: int, user_id: int, deadline_utc: str) -> bool:
+        """
+        Set deadline for a task.
+        
+        Args:
+            task_id: Task ID
+            user_id: User ID (for security check)
+            deadline_utc: ISO 8601 datetime string in UTC
+        
+        Returns:
+            True if task was updated, False if not found or unauthorized
+        """
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE tasks
+                SET deadline = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?;
+                """,
+                (deadline_utc, now, task_id, user_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def clear_deadline(self, task_id: int, user_id: int) -> bool:
+        """
+        Clear deadline for a task.
+        
+        Args:
+            task_id: Task ID
+            user_id: User ID (for security check)
+        
+        Returns:
+            True if task was updated, False if not found or unauthorized
+        """
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE tasks
+                SET deadline = NULL, updated_at = ?
+                WHERE id = ? AND user_id = ?;
+                """,
+                (now, task_id, user_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def set_schedule(self, task_id: int, user_id: int, schedule_kind: str, schedule_payload: dict) -> bool:
+        """
+        Set schedule window for a task.
+        
+        Args:
+            task_id: Task ID
+            user_id: User ID (for security check)
+            schedule_kind: One of 'none', 'at_time', 'time_range', 'all_day'
+            schedule_payload: Dict with schedule details:
+                - 'at_time': {'timestamp': 'ISO datetime'}
+                - 'time_range': {'start_time': 'ISO datetime', 'end_time': 'ISO datetime'}
+                - 'all_day': {'date': 'YYYY-MM-DD'}
+                - 'none': {}
+        
+        Returns:
+            True if task was updated, False if not found or unauthorized
+        """
+        now = self._now_iso()
+        schedule_json_str = json.dumps(schedule_payload) if schedule_payload else None
+        
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE tasks
+                SET schedule_kind = ?, schedule_json = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?;
+                """,
+                (schedule_kind, schedule_json_str, now, task_id, user_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def clear_schedule(self, task_id: int, user_id: int) -> bool:
+        """
+        Clear schedule window for a task.
+        
+        Args:
+            task_id: Task ID
+            user_id: User ID (for security check)
+        
+        Returns:
+            True if task was updated, False if not found or unauthorized
+        """
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE tasks
+                SET schedule_kind = NULL, schedule_json = NULL, updated_at = ?
+                WHERE id = ? AND user_id = ?;
+                """,
+                (now, task_id, user_id),
             )
             await db.commit()
             return cur.rowcount > 0

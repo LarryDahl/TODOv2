@@ -45,18 +45,21 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
             )
         )
     
-    # Bottom buttons: asetukset, tilastot
+    # Bottom buttons: lisää, tehty, poista, muokkaa
+    kb.row(
+        InlineKeyboardButton(text="lisää", callback_data="view:add"),
+        InlineKeyboardButton(text="tehty", callback_data="view:done"),
+        InlineKeyboardButton(text="poista", callback_data="view:deleted"),
+        InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
+        width=4,
+    )
+    
+    # Bottom buttons: asetukset, tilastot, päivitä
     kb.row(
         InlineKeyboardButton(text="asetukset", callback_data="view:settings"),
         InlineKeyboardButton(text="tilastot", callback_data="view:stats"),
-        width=2,
-    )
-    
-    # Bottom buttons: muokkaa, lisää
-    kb.row(
-        InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
-        InlineKeyboardButton(text="lisää", callback_data="view:add"),
-        width=2,
+        InlineKeyboardButton(text="päivitä", callback_data="view:refresh"),
+        width=3,
     )
     
     return kb.as_markup()
@@ -71,22 +74,31 @@ def settings_kb() -> InlineKeyboardMarkup:
 
 
 def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
-    """Edit view: muokkaa tehtävää n, poista for each task, takaisin"""
+    """Edit view: muokkaa (from title click), deadline, schedule, poista for each task, takaisin"""
     kb = InlineKeyboardBuilder()
     
     for task in tasks:
         # Render title with priority indicators (!)
         rendered_title = render_title_with_priority(task.text, task.priority)
+        task_text = _label(rendered_title, 30)
+        
+        # Task title button (edits task - click to edit)
         kb.row(
             InlineKeyboardButton(
-                text=f"muokkaa {_label(rendered_title, 30)}",
+                text=task_text,
                 callback_data=f"task:edit:{task.id}",
-            ),
-            InlineKeyboardButton(text="poista", callback_data=f"task:del:{task.id}"),
-            width=2,
+            )
+        )
+        
+        # Action buttons: deadline, schedule, poista (all on one row)
+        kb.row(
+            InlineKeyboardButton(text="⏰ Deadline", callback_data=f"task:deadline:{task.id}"),
+            InlineKeyboardButton(text="🗓 Schedule", callback_data=f"task:schedule:{task.id}"),
+            InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"),
+            width=3,
         )
     
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
     return kb.as_markup()
 
 
@@ -205,3 +217,116 @@ def render_add_difficulty_header() -> str:
 
 def render_add_category_header() -> str:
     return "Kategoria\n\nValitse tehtävän kategoria tai skip jos haluat jättää tyhjäksi."
+
+
+def date_picker_kb(prefix: str, include_none: bool = True) -> InlineKeyboardMarkup:
+    """Date picker keyboard for deadline/schedule selection."""
+    from datetime import datetime, timedelta, timezone
+    
+    kb = InlineKeyboardBuilder()
+    
+    if include_none:
+        kb.row(InlineKeyboardButton(text="Ei määräaikaa", callback_data=f"{prefix}:none"))
+    
+    kb.row(
+        InlineKeyboardButton(text="Tänään", callback_data=f"{prefix}:0"),
+        InlineKeyboardButton(text="Huomenna", callback_data=f"{prefix}:1"),
+        width=2,
+    )
+    
+    now = datetime.now(timezone.utc)
+    for i in range(2, 9):
+        date = now + timedelta(days=i)
+        kb.row(InlineKeyboardButton(
+            text=f"{date.strftime('%a')} {date.day}",
+            callback_data=f"{prefix}:{i}"
+        ))
+    
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def time_picker_kb(prefix: str) -> InlineKeyboardMarkup:
+    """
+    Time picker keyboard with preset times and custom option.
+    
+    Args:
+        prefix: Callback data prefix (e.g., "deadline:time" or "schedule:time")
+    """
+    kb = InlineKeyboardBuilder()
+    
+    kb.row(
+        InlineKeyboardButton(text="09:00", callback_data=f"{prefix}:09:00"),
+        InlineKeyboardButton(text="12:00", callback_data=f"{prefix}:12:00"),
+        width=2,
+    )
+    kb.row(
+        InlineKeyboardButton(text="18:00", callback_data=f"{prefix}:18:00"),
+        InlineKeyboardButton(text="21:00", callback_data=f"{prefix}:21:00"),
+        width=2,
+    )
+    kb.row(InlineKeyboardButton(text="Muu aika", callback_data=f"{prefix}:custom"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data=f"{prefix}:back"))
+    return kb.as_markup()
+
+
+def schedule_type_kb() -> InlineKeyboardMarkup:
+    """Schedule type selection keyboard."""
+    kb = InlineKeyboardBuilder()
+    
+    kb.row(InlineKeyboardButton(text="Ei aikataulua", callback_data="schedule:type:none"))
+    kb.row(InlineKeyboardButton(text="Tietty aika", callback_data="schedule:type:at_time"))
+    kb.row(InlineKeyboardButton(text="Aikaväli", callback_data="schedule:type:time_range"))
+    kb.row(InlineKeyboardButton(text="Koko päivä", callback_data="schedule:type:all_day"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def _format_task_date(iso_str: str) -> str:
+    """Format ISO datetime string to readable format."""
+    if not iso_str:
+        return ""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (ValueError, AttributeError):
+        return iso_str[:10] if len(iso_str) >= 10 else iso_str
+
+
+def done_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
+    """Done tasks view keyboard with pagination."""
+    kb = InlineKeyboardBuilder()
+    
+    for task in tasks:
+        task_text = _label(task.get('title', ''), 48)
+        date_str = _format_task_date(task.get('updated_at', ''))
+        display_text = f"✓ {task_text}" + (f" ({date_str})" if date_str else "")
+        
+        kb.row(InlineKeyboardButton(text=display_text, callback_data="noop"))
+    
+    if len(tasks) >= 50:
+        kb.row(InlineKeyboardButton(text="📄 Näytä lisää", callback_data=f"done:page:{offset + 50}"))
+    
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def deleted_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
+    """Deleted tasks view keyboard with restore buttons and pagination."""
+    kb = InlineKeyboardBuilder()
+    
+    for task in tasks:
+        task_text = _label(task.get('title', ''), 35)
+        event_id = task.get('job_id')
+        date_str = _format_task_date(task.get('updated_at', ''))
+        display_text = f"🗑 {task_text}" + (f" ({date_str})" if date_str else "")
+        
+        callback = f"deleted:restore:{event_id}" if event_id else "noop"
+        kb.row(InlineKeyboardButton(text=display_text, callback_data=callback))
+    
+    if len(tasks) >= 50:
+        kb.row(InlineKeyboardButton(text="📄 Näytä lisää", callback_data=f"deleted:page:{offset + 50}"))
+    
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
+    return kb.as_markup()
