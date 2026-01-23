@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.priority import parse_priority
+from app.priority_compute import compute_priority
 
 
 @dataclass(frozen=True)
@@ -101,21 +102,21 @@ class TasksRepo:
     async def list_tasks(self, user_id: int, limit: int = 50) -> list[Task]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
+            # Fetch all tasks to ensure consistent sorting across different views
             cur = await db.execute(
                 """
                 SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at
                 FROM tasks
-                WHERE user_id = ?
-                ORDER BY priority DESC, 
-                         CASE WHEN deadline IS NULL THEN 1 ELSE 0 END,
-                         deadline ASC,
-                         created_at ASC
-                LIMIT ?;
+                WHERE user_id = ?;
                 """,
-                (user_id, limit),
+                (user_id,),
             )
-            rows = await cur.fetchall()
-            return [Task(**dict(r)) for r in rows]
+            tasks = [Task(**dict(r)) for r in await cur.fetchall()]
+            
+            # Sort by computed priority
+            now = datetime.now(timezone.utc)
+            tasks.sort(key=lambda t: compute_priority(t, now), reverse=True)
+            return tasks[:limit]
     
     async def list_completed_tasks(self, user_id: int, limit: int = 3) -> list[dict]:
         """Get most recently completed tasks"""
@@ -134,25 +135,10 @@ class TasksRepo:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
     
-    async def list_done_tasks(self, user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
-        """
-        List completed tasks with deadline and schedule metadata.
-        
-        Note: Since tasks are deleted on completion, deadline/schedule info is not preserved.
-        Returns list of dicts with keys: job_id, title, due_at, schedule_kind, schedule_json, status, updated_at
-        
-        Args:
-            user_id: User ID
-            limit: Maximum number of tasks to return (default 50)
-            offset: Number of tasks to skip (default 0)
-        
-        Returns:
-            List of dicts with task information
-        """
+    async def _list_event_tasks(self, user_id: int, action: str, limit: int, offset: int) -> list[dict]:
+        """Helper to list tasks from events (done/deleted)."""
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
-            # Tasks are deleted on completion, so we can only get data from events
-            # deadline/schedule info is lost unless stored in events (future enhancement)
             cur = await db.execute(
                 """
                 SELECT 
@@ -162,55 +148,24 @@ class TasksRepo:
                     NULL as due_at,
                     NULL as schedule_kind,
                     NULL as schedule_json,
-                    'done' as status,
+                    ? as status,
                     e.at as updated_at
                 FROM task_events e
-                WHERE e.user_id = ? AND e.action = 'completed'
+                WHERE e.user_id = ? AND e.action = ?
                 ORDER BY e.at DESC
                 LIMIT ? OFFSET ?;
                 """,
-                (user_id, limit, offset),
+                (action, user_id, action, limit, offset),
             )
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def list_done_tasks(self, user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+        """List completed tasks with deadline and schedule metadata."""
+        return await self._list_event_tasks(user_id, 'completed', limit, offset)
     
     async def list_deleted_tasks(self, user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
-        """
-        List deleted (cancelled) tasks with deadline and schedule metadata.
-        
-        Note: Since tasks are deleted, deadline/schedule info is not preserved.
-        Returns list of dicts with keys: job_id, title, due_at, schedule_kind, schedule_json, status, updated_at
-        
-        Args:
-            user_id: User ID
-            limit: Maximum number of tasks to return (default 50)
-            offset: Number of tasks to skip (default 0)
-        
-        Returns:
-            List of dicts with task information
-        """
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute(
-                """
-                SELECT 
-                    e.id as job_id,
-                    e.task_id,
-                    e.text as title,
-                    NULL as due_at,
-                    NULL as schedule_kind,
-                    NULL as schedule_json,
-                    'cancelled' as status,
-                    e.at as updated_at
-                FROM task_events e
-                WHERE e.user_id = ? AND e.action = 'deleted'
-                ORDER BY e.at DESC
-                LIMIT ? OFFSET ?;
-                """,
-                (user_id, limit, offset),
-            )
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+        """List deleted (cancelled) tasks with deadline and schedule metadata."""
+        return await self._list_event_tasks(user_id, 'deleted', limit, offset)
 
     async def add_task(
         self, 
