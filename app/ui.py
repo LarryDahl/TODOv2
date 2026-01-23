@@ -74,31 +74,40 @@ def settings_kb() -> InlineKeyboardMarkup:
 
 
 def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
-    """Edit view: muokkaa (from title click), deadline, schedule, poista for each task, takaisin"""
+    """Edit view: list of tasks only (click task to open action menu)"""
     kb = InlineKeyboardBuilder()
     
     for task in tasks:
         # Render title with priority indicators (!)
         rendered_title = render_title_with_priority(task.text, task.priority)
-        task_text = _label(rendered_title, 30)
+        task_text = _label(rendered_title, 48)
         
-        # Task title button (edits task - click to edit)
+        # Task title button (opens action menu)
         kb.row(
             InlineKeyboardButton(
                 text=task_text,
-                callback_data=f"task:edit:{task.id}",
+                callback_data=f"task:menu:{task.id}",
             )
-        )
-        
-        # Action buttons: deadline, schedule, poista (all on one row)
-        kb.row(
-            InlineKeyboardButton(text="⏰ Deadline", callback_data=f"task:deadline:{task.id}"),
-            InlineKeyboardButton(text="🗓 Schedule", callback_data=f"task:schedule:{task.id}"),
-            InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"),
-            width=3,
         )
     
     kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def task_action_kb(task: Task) -> InlineKeyboardMarkup:
+    """Action menu for a single task: muokkaa, deadline, schedule, poista"""
+    kb = InlineKeyboardBuilder()
+    
+    # Render title with priority indicators
+    rendered_title = render_title_with_priority(task.text, task.priority)
+    
+    # Action buttons
+    kb.row(InlineKeyboardButton(text="✏️ Muokkaa", callback_data=f"task:edit:{task.id}"))
+    kb.row(InlineKeyboardButton(text="⏰ Lisää deadline", callback_data=f"task:deadline:{task.id}"))
+    kb.row(InlineKeyboardButton(text="🗓 Lisää schedule", callback_data=f"task:schedule:{task.id}"))
+    kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:edit"))
+    
     return kb.as_markup()
 
 
@@ -187,7 +196,7 @@ def render_settings_header() -> str:
 
 
 def render_edit_header() -> str:
-    return "Muokkaa tehtäviä\n\nValitse tehtävä muokattavaksi tai poistettavaksi."
+    return "Muokkaa tehtäviä\n\nValitse tehtävä nähdäksesi toimintovaihtoehdot."
 
 
 def render_stats_header(stats: dict) -> str:
