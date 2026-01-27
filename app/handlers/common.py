@@ -6,10 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from app.db import TasksRepo
-from app.ui import default_kb, render_default_header
+from app.ui import build_home_keyboard, render_home_text
 
 
 class Flow(StatesGroup):
@@ -69,22 +69,66 @@ class CtxKeys:
     project_name: str = "project_name"
 
 
+async def render_home_message(
+    user_id: int,
+    repo: TasksRepo,
+    force_refresh: bool = False
+) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Unified function to render the main menu/home view.
+    This is the ONLY function that should render the main menu.
+    
+    Returns:
+        Tuple of (header_text, keyboard)
+    """
+    import logging
+    
+    # Debug log to track which renderer is called
+    logging.info(f"[MAIN_MENU] render_home_message called for user {user_id} (force_refresh={force_refresh})")
+    
+    # Fetch data
+    completed = await repo.list_completed_tasks(user_id=user_id, limit=3)
+    active = await repo.list_tasks(user_id=user_id, limit=50)  # Get more for proper sorting
+    active_steps = await repo.get_active_project_steps()
+    
+    # Count completed and active tasks for progress calculation
+    completed_count = len(completed)
+    active_count = len(active)
+    
+    # Build header text with progress bar
+    header_text = render_home_text(
+        completed_count=completed_count,
+        active_count=active_count,
+        active_steps=active_steps,
+        force_refresh=force_refresh
+    )
+    
+    # Build keyboard with new order
+    keyboard = build_home_keyboard(
+        completed_tasks=completed,
+        active_tasks=active,
+        active_steps=active_steps
+    )
+    
+    return header_text, keyboard
+
+
 async def _show_home_from_message(message: Message, repo: TasksRepo, state: FSMContext | None = None) -> None:
     """Show default home view from message. Always clears state and returns to main menu."""
+    import logging
+    
+    logging.info(f"[MAIN_MENU] _show_home_from_message called (user_id={message.from_user.id})")
+    
     if state:
         await state.clear()
     
-    completed = await repo.list_completed_tasks(user_id=message.from_user.id, limit=3)
-    active = await repo.list_tasks(user_id=message.from_user.id, limit=7)
-    active_steps = await repo.get_active_project_steps()
-    daily_progress = await repo.get_daily_progress(user_id=message.from_user.id)
+    header_text, keyboard = await render_home_message(
+        user_id=message.from_user.id,
+        repo=repo,
+        force_refresh=False
+    )
     
-    # Add separator text between lists if both exist
-    header_text = render_default_header(daily_progress)
-    if completed and active:
-        header_text += "\n\n─────────────"
-    
-    await message.answer(header_text, reply_markup=default_kb(completed, active, active_steps))
+    await message.answer(header_text, reply_markup=keyboard)
 
 
 async def _show_home_from_cb(
@@ -95,34 +139,29 @@ async def _show_home_from_cb(
     force_refresh: bool = False
 ) -> None:
     """Show default home view from callback. Always clears state, answers callback, and returns to main menu."""
+    import logging
     from aiogram.exceptions import TelegramBadRequest
+    
+    logging.info(f"[MAIN_MENU] _show_home_from_cb called (user_id={cb.from_user.id}, force_refresh={force_refresh})")
     
     if state:
         await state.clear()
     
-    completed = await repo.list_completed_tasks(user_id=cb.from_user.id, limit=3)
-    active = await repo.list_tasks(user_id=cb.from_user.id, limit=7)
-    active_steps = await repo.get_active_project_steps()
-    daily_progress = await repo.get_daily_progress(user_id=cb.from_user.id)
-    
-    # Add separator text between lists if both exist
-    header_text = render_default_header(daily_progress)
-    if completed and active:
-        header_text += "\n\n─────────────"
-    
-    # If force refresh, add invisible character to force update
-    if force_refresh:
-        header_text += "\u200b"  # Zero-width space
+    header_text, keyboard = await render_home_message(
+        user_id=cb.from_user.id,
+        repo=repo,
+        force_refresh=force_refresh
+    )
     
     if cb.message:
         try:
-            await cb.message.edit_text(header_text, reply_markup=default_kb(completed, active, active_steps))
+            await cb.message.edit_text(header_text, reply_markup=keyboard)
         except TelegramBadRequest as e:
             # If message is not modified and we're forcing refresh, try with reply_markup only
             if "message is not modified" in str(e).lower() and force_refresh:
                 try:
                     # Force update by editing reply markup separately
-                    await cb.message.edit_reply_markup(reply_markup=default_kb(completed, active, active_steps))
+                    await cb.message.edit_reply_markup(reply_markup=keyboard)
                 except Exception:
                     pass  # If still fails, just answer
             elif "message is not modified" in str(e).lower():
