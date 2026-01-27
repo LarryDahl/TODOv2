@@ -3,6 +3,8 @@ Add task flow handlers.
 """
 from __future__ import annotations
 
+import aiosqlite
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -166,6 +168,79 @@ async def msg_custom_difficulty(message: Message, state: FSMContext, repo: Tasks
         f"Tehtävä: {task_text}\n\n" + render_add_category_header(),
         reply_markup=add_task_category_kb()
     )
+
+
+@router.callback_query(F.data == "view:add_backlog")
+async def cb_add_backlog(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Start backlog project creation flow"""
+    await state.set_state(Flow.waiting_project_name)
+    if cb.message:
+        await cb.message.answer("Projektin nimi?")
+    await cb.answer()
+
+
+@router.message(Flow.waiting_project_name)
+async def msg_project_name(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle project name input"""
+    from app.handlers.common import return_to_main_menu
+    
+    project_name = (message.text or "").strip()
+    
+    # Handle cancellation
+    if not project_name or project_name.lower() in ("/peruuta", "/cancel", "/peru"):
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    # Store project name and ask for steps
+    await state.update_data({CtxKeys.project_name: project_name})
+    await state.set_state(Flow.waiting_project_steps)
+    await message.answer("Lähetä askeleet, yksi per rivi:")
+
+
+@router.message(Flow.waiting_project_steps)
+async def msg_project_steps(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle project steps input"""
+    from app.handlers.common import return_to_main_menu
+    
+    text = message.text or ""
+    
+    # Handle cancellation
+    if text.strip().lower() in ("/peruuta", "/cancel", "/peru"):
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    # Parse steps (one per line, trim empty lines)
+    steps = [line.strip() for line in text.split('\n') if line.strip()]
+    
+    # Validate: need at least 2 steps
+    if len(steps) < 2:
+        await message.answer("Tarvitaan vähintään 2 askelta. Lähetä askeleet, yksi per rivi:")
+        return
+    
+    # Get project name from state
+    data = await state.get_data()
+    project_name = data.get(CtxKeys.project_name)
+    
+    if not project_name:
+        await message.answer("Virhe: projektin nimi puuttuu.")
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    # Create project
+    now = repo._now_iso()
+    project_id = await repo.create_project(title=project_name, now=now)
+    
+    # Add steps
+    await repo.add_project_steps(project_id=project_id, list_of_texts=steps, now=now)
+    
+    # Activate first step atomically (ensures consistency)
+    success = await repo.activate_first_project_step(project_id=project_id, now=now)
+    if not success:
+        await message.answer("Virhe: ensimmäistä askelta ei voitu aktivoida.")
+        await return_to_main_menu(message, repo, state=state)
+        return
+    
+    await return_to_main_menu(message, repo, state=state, answer_text="Projekti luotu", force_refresh=True)
 
 
 @router.message()

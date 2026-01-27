@@ -12,8 +12,8 @@ def _label(text: str, max_len: int = 48) -> str:
     return t[:max_len] + ("…" if len(t) > max_len else "")
 
 
-def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineKeyboardMarkup:
-    """Default view: 3 completed tasks, 7 active tasks, settings/stats, edit/add buttons"""
+def default_kb(completed_tasks: list[dict], active_tasks: list[Task], active_steps: list[dict] | None = None) -> InlineKeyboardMarkup:
+    """Default view: 3 completed tasks, 7 active tasks, active project steps, settings/stats, edit/add buttons"""
     kb = InlineKeyboardBuilder()
     
     # 3 most recently completed tasks (reverse order: oldest first, newest last)
@@ -29,7 +29,7 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
         )
     
     # Separator between lists (text indicator, not a button)
-    if completed_tasks and active_tasks:
+    if completed_tasks and (active_tasks or (active_steps and len(active_steps) > 0)):
         # Use a non-clickable separator - we'll add this in the message text instead
         pass
     
@@ -45,13 +45,43 @@ def default_kb(completed_tasks: list[dict], active_tasks: list[Task]) -> InlineK
             )
         )
     
-    # Bottom buttons: lisää, tehty, poista, muokkaa
+    # Active project steps (append after tasks)
+    if active_steps:
+        for step in active_steps:
+            project_title = step.get('project_title', '')
+            step_text = step.get('text', '')
+            order_index = step.get('order_index', 0)
+            total_steps = step.get('total_steps', 0)
+            step_id = step.get('id', 0)
+            project_id = step.get('project_id', 0)
+            
+            # Format: "[PRJ] <Project title>: <step text> [i/N]"
+            display_text = f"[PRJ] {project_title}: {step_text} [{order_index}/{total_steps}]"
+            display_text = _label(display_text, 48)
+            
+            # Two buttons: step action and project view
+            kb.row(
+                InlineKeyboardButton(
+                    text=display_text,
+                    callback_data=f"ps:{step_id}",
+                ),
+                InlineKeyboardButton(
+                    text="📋",
+                    callback_data=f"p:{project_id}",
+                ),
+                width=2,
+            )
+    
+    # Bottom buttons: lisää, backlog, tehty, poista, muokkaa
     kb.row(
         InlineKeyboardButton(text="lisää", callback_data="view:add"),
+        InlineKeyboardButton(text="backlog", callback_data="view:add_backlog"),
         InlineKeyboardButton(text="tehty", callback_data="view:done"),
         InlineKeyboardButton(text="poista", callback_data="view:deleted"),
-        InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
         width=4,
+    )
+    kb.row(
+        InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
     )
     
     # Bottom buttons: asetukset, tilastot, päivitä
@@ -438,3 +468,55 @@ def suggestions_kb(suggestions: list[dict]) -> InlineKeyboardMarkup:
 def render_suggestions_header(count: int) -> str:
     """Render suggestions view header"""
     return f"💡 Ehdotukset\n\n{count} ehdotusta backlogista.\n\nValitse 'Lisää tehtävälistaan' lisätäksesi tehtävän takaisin listalle."
+
+
+def project_detail_kb() -> InlineKeyboardMarkup:
+    """Project detail view keyboard with back button"""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin listaan", callback_data="view:home"))
+    return kb.as_markup()
+
+
+def render_project_detail(project: dict, steps: list[dict]) -> str:
+    """
+    Render project detail view with all steps and their statuses.
+    
+    Args:
+        project: Dict with keys: id, title, status, current_step_order, created_at, updated_at
+        steps: List of step dicts with keys: id, project_id, order_index, text, status, created_at, done_at
+    
+    Returns:
+        Formatted text showing project title, steps with statuses, and progress
+    """
+    project_title = project.get('title', 'Unknown Project')
+    
+    # Count steps by status
+    total_steps = len(steps)
+    completed_count = sum(1 for s in steps if s.get('status') == 'completed')
+    active_count = sum(1 for s in steps if s.get('status') == 'active')
+    pending_count = sum(1 for s in steps if s.get('status') == 'pending')
+    
+    # Build header
+    lines = [f"📋 {project_title}", ""]
+    
+    # Progress summary
+    lines.append(f"Edistyminen: {completed_count}/{total_steps}")
+    lines.append("")
+    
+    # List all steps with status
+    for step in steps:
+        order_index = step.get('order_index', 0)
+        step_text = step.get('text', '')
+        status = step.get('status', 'pending')
+        
+        # Format status label
+        if status == 'active':
+            status_label = "[ACTIVE]"
+        elif status == 'completed':
+            status_label = "[DONE]"
+        else:  # pending
+            status_label = "[PENDING]"
+        
+        lines.append(f"{status_label} {step_text}")
+    
+    return "\n".join(lines)

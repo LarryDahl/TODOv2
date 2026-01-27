@@ -135,6 +135,42 @@ class TasksRepo:
             )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_action_log_user_at ON action_log(user_id, at);")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_action_log_action ON action_log(action);")
+            
+            # Projects table for backlog projects with ordered steps
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_step_order INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            
+            # Project steps table
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS project_steps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    order_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    done_at TEXT,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
+                """
+            )
+            
+            # Indexes for project_steps
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_project_steps_project_id ON project_steps(project_id);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_project_steps_project_status ON project_steps(project_id, status);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_project_steps_project_order ON project_steps(project_id, order_index);")
+            
             await db.commit()
 
     async def list_tasks(self, user_id: int, limit: int = 50) -> list[Task]:
@@ -933,12 +969,16 @@ class TasksRepo:
             
             # Log action (non-blocking)
             if success:
-                await self.log_action(
-                    user_id=user_id,
-                    action=ACTION_TASK_EDITED,
-                    task_id=task_id,
-                    payload={'new_text': clean_title, 'priority': priority},
-                )
+                # Get task to extract text and priority for logging
+                task = await self.get_task(user_id=user_id, task_id=task_id)
+                if task:
+                    clean_title, priority = parse_priority(task.text)
+                    await self.log_action(
+                        user_id=user_id,
+                        action=ACTION_TASK_EDITED,
+                        task_id=task_id,
+                        payload={'new_text': clean_title, 'priority': priority},
+                    )
             
             return success
     
@@ -968,12 +1008,16 @@ class TasksRepo:
             
             # Log action (non-blocking)
             if success:
-                await self.log_action(
-                    user_id=user_id,
-                    action=ACTION_TASK_EDITED,
-                    task_id=task_id,
-                    payload={'new_text': clean_title, 'priority': priority},
-                )
+                # Get task to extract text and priority for logging
+                task = await self.get_task(user_id=user_id, task_id=task_id)
+                if task:
+                    clean_title, priority = parse_priority(task.text)
+                    await self.log_action(
+                        user_id=user_id,
+                        action=ACTION_TASK_EDITED,
+                        task_id=task_id,
+                        payload={'new_text': clean_title, 'priority': priority},
+                    )
             
             return success
     
@@ -1011,12 +1055,16 @@ class TasksRepo:
             
             # Log action (non-blocking)
             if success:
-                await self.log_action(
-                    user_id=user_id,
-                    action=ACTION_TASK_EDITED,
-                    task_id=task_id,
-                    payload={'new_text': clean_title, 'priority': priority},
-                )
+                # Get task to extract text and priority for logging
+                task = await self.get_task(user_id=user_id, task_id=task_id)
+                if task:
+                    clean_title, priority = parse_priority(task.text)
+                    await self.log_action(
+                        user_id=user_id,
+                        action=ACTION_TASK_EDITED,
+                        task_id=task_id,
+                        payload={'new_text': clean_title, 'priority': priority},
+                    )
             
             return success
     
@@ -1046,11 +1094,508 @@ class TasksRepo:
             
             # Log action (non-blocking)
             if success:
-                await self.log_action(
-                    user_id=user_id,
-                    action=ACTION_TASK_EDITED,
-                    task_id=task_id,
-                    payload={'new_text': clean_title, 'priority': priority},
-                )
+                # Get task to extract text and priority for logging
+                task = await self.get_task(user_id=user_id, task_id=task_id)
+                if task:
+                    clean_title, priority = parse_priority(task.text)
+                    await self.log_action(
+                        user_id=user_id,
+                        action=ACTION_TASK_EDITED,
+                        task_id=task_id,
+                        payload={'new_text': clean_title, 'priority': priority},
+                    )
             
             return success
+    
+    async def create_project(self, title: str, now: str) -> int:
+        """
+        Create a new project.
+        
+        Args:
+            title: Project title
+            now: ISO datetime string in UTC (use self._now_iso())
+        
+        Returns:
+            Project ID
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO projects (title, status, current_step_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?);
+                """,
+                (title, 'active', None, now, now),
+            )
+            await db.commit()
+            return int(cur.lastrowid)
+    
+    async def add_project_steps(self, project_id: int, list_of_texts: list[str], now: str) -> None:
+        """
+        Add steps to a project.
+        
+        Args:
+            project_id: Project ID
+            list_of_texts: List of step texts (will be assigned order_index 1..N)
+            now: ISO datetime string in UTC (use self._now_iso())
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            for idx, text in enumerate(list_of_texts, start=1):
+                await db.execute(
+                    """
+                    INSERT INTO project_steps (project_id, order_index, text, status, created_at, done_at)
+                    VALUES (?, ?, ?, ?, ?, ?);
+                    """,
+                    (project_id, idx, text, 'pending', now, None),
+                )
+            await db.commit()
+    
+    async def get_active_project_steps(self) -> list[dict]:
+        """
+        Get all project steps with status='active', including project title and total step count.
+        
+        Returns:
+            List of dicts with keys: id, project_id, order_index, text, status, created_at, done_at,
+            project_title, total_steps
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT 
+                    ps.id,
+                    ps.project_id,
+                    ps.order_index,
+                    ps.text,
+                    ps.status,
+                    ps.created_at,
+                    ps.done_at,
+                    p.title as project_title,
+                    (SELECT COUNT(*) FROM project_steps ps2 WHERE ps2.project_id = ps.project_id) as total_steps
+                FROM project_steps ps
+                JOIN projects p ON ps.project_id = p.id
+                WHERE ps.status = ? AND p.status != 'cancelled';
+                """,
+                ('active',),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+    async def get_project_step(self, step_id: int) -> Optional[dict]:
+        """
+        Get a project step by ID.
+        
+        Args:
+            step_id: Step ID
+        
+        Returns:
+            Dict with keys: id, project_id, order_index, text, status, created_at, done_at
+            Returns None if step not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, project_id, order_index, text, status, created_at, done_at
+                FROM project_steps
+                WHERE id = ?;
+                """,
+                (step_id,),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+    
+    async def mark_project_step_completed(self, step_id: int, done_at: str) -> bool:
+        """
+        Mark a project step as completed.
+        
+        Args:
+            step_id: Step ID
+            done_at: ISO datetime string in UTC
+        
+        Returns:
+            True if step was updated, False if not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE project_steps
+                SET status = ?, done_at = ?
+                WHERE id = ?;
+                """,
+                ('completed', done_at, step_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def get_next_pending_step(self, project_id: int, after_order_index: int) -> Optional[dict]:
+        """
+        Get the next pending step for a project after a given order_index.
+        
+        Args:
+            project_id: Project ID
+            after_order_index: Order index to search after
+        
+        Returns:
+            Dict with keys: id, project_id, order_index, text, status, created_at, done_at
+            Returns None if no pending step found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, project_id, order_index, text, status, created_at, done_at
+                FROM project_steps
+                WHERE project_id = ? AND status = ? AND order_index > ?
+                ORDER BY order_index ASC
+                LIMIT 1;
+                """,
+                (project_id, 'pending', after_order_index),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+    
+    async def set_project_step_active(self, step_id: int) -> bool:
+        """
+        Set a project step status to 'active'.
+        
+        Args:
+            step_id: Step ID
+        
+        Returns:
+            True if step was updated, False if not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE project_steps
+                SET status = ?
+                WHERE id = ?;
+                """,
+                ('active', step_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def update_project_current_step(self, project_id: int, current_step_order: Optional[int], now: str) -> bool:
+        """
+        Update the current_step_order for a project.
+        
+        Args:
+            project_id: Project ID
+            current_step_order: New current step order index, or None
+            now: ISO datetime string in UTC
+        
+        Returns:
+            True if project was updated, False if not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE projects
+                SET current_step_order = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (current_step_order, now, project_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def activate_first_project_step(self, project_id: int, now: str) -> bool:
+        """
+        Atomically activate the first step of a project and update the project's current_step_order.
+        This ensures consistency: if one operation fails, both are rolled back.
+        
+        Args:
+            project_id: Project ID
+            now: ISO datetime string in UTC
+        
+        Returns:
+            True if both operations succeeded, False otherwise
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Get the first step ID (order_index=1)
+            cur = await db.execute(
+                """
+                SELECT id FROM project_steps
+                WHERE project_id = ? AND order_index = 1;
+                """,
+                (project_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return False
+            
+            first_step_id = row['id']
+            
+            # Activate the step
+            cur = await db.execute(
+                """
+                UPDATE project_steps
+                SET status = ?
+                WHERE id = ?;
+                """,
+                ('active', first_step_id),
+            )
+            if cur.rowcount == 0:
+                return False
+            
+            # Update project current_step_order
+            cur = await db.execute(
+                """
+                UPDATE projects
+                SET current_step_order = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (1, now, project_id),
+            )
+            if cur.rowcount == 0:
+                return False
+            
+            # Commit both operations atomically
+            await db.commit()
+            return True
+    
+    async def mark_project_completed(self, project_id: int, now: str) -> bool:
+        """
+        Mark a project as completed.
+        
+        Args:
+            project_id: Project ID
+            now: ISO datetime string in UTC
+        
+        Returns:
+            True if project was updated, False if not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE projects
+                SET status = ?, current_step_order = NULL, updated_at = ?
+                WHERE id = ?;
+                """,
+                ('completed', now, project_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def advance_project_step(self, step_id: int, now: str) -> dict:
+        """
+        Atomically advance a project step: mark current step completed and activate next pending step.
+        If no next step exists, mark project as completed.
+        
+        Args:
+            step_id: ID of the step to advance (must be currently 'active')
+            now: ISO datetime string in UTC (use self._now_iso())
+        
+        Returns:
+            Dict with keys:
+            - action: "advanced" | "completed_project" | "noop"
+            - project_id: int
+            - completed_step_id: int
+            - new_active_step_id: int | None
+        """
+        # Validate step exists and is active
+        step = await self.get_project_step(step_id)
+        if not step:
+            raise ValueError(f"Step {step_id} not found")
+        
+        if step['status'] != 'active':
+            # Idempotent: return no-op result if step is not active
+            return {
+                "action": "noop",
+                "project_id": step['project_id'],
+                "completed_step_id": step_id,
+                "new_active_step_id": None,
+            }
+        
+        project_id = step['project_id']
+        current_order_index = step['order_index']
+        
+        # Perform atomic transaction
+        async with aiosqlite.connect(self._db_path) as db:
+            # Mark current step completed
+            await db.execute(
+                """
+                UPDATE project_steps
+                SET status = ?, done_at = ?
+                WHERE id = ?;
+                """,
+                ('completed', now, step_id),
+            )
+            
+            # Find next pending step
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, project_id, order_index, text, status, created_at, done_at
+                FROM project_steps
+                WHERE project_id = ? AND status = ? AND order_index > ?
+                ORDER BY order_index ASC
+                LIMIT 1;
+                """,
+                (project_id, 'pending', current_order_index),
+            )
+            next_step_row = await cur.fetchone()
+            
+            if next_step_row:
+                # Activate next step
+                next_step = dict(next_step_row)
+                next_step_id = next_step['id']
+                next_order_index = next_step['order_index']
+                
+                await db.execute(
+                    """
+                    UPDATE project_steps
+                    SET status = ?
+                    WHERE id = ?;
+                    """,
+                    ('active', next_step_id),
+                )
+                
+                # Update project current_step_order, keep status='active'
+                await db.execute(
+                    """
+                    UPDATE projects
+                    SET current_step_order = ?, updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    (next_order_index, now, project_id),
+                )
+                
+                await db.commit()
+                
+                return {
+                    "action": "advanced",
+                    "project_id": project_id,
+                    "completed_step_id": step_id,
+                    "new_active_step_id": next_step_id,
+                }
+            else:
+                # No more steps: mark project completed
+                await db.execute(
+                    """
+                    UPDATE projects
+                    SET status = ?, current_step_order = NULL, updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    ('completed', now, project_id),
+                )
+                
+                await db.commit()
+                
+                return {
+                    "action": "completed_project",
+                    "project_id": project_id,
+                    "completed_step_id": step_id,
+                    "new_active_step_id": None,
+                }
+    
+    async def get_project(self, project_id: int) -> Optional[dict]:
+        """
+        Get a project by ID.
+        
+        Args:
+            project_id: Project ID
+        
+        Returns:
+            Dict with keys: id, title, status, current_step_order, created_at, updated_at
+            Returns None if project not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, title, status, current_step_order, created_at, updated_at
+                FROM projects
+                WHERE id = ?;
+                """,
+                (project_id,),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+    
+    async def get_project_steps(self, project_id: int) -> list[dict]:
+        """
+        Get all steps for a project, ordered by order_index.
+        
+        Args:
+            project_id: Project ID
+        
+        Returns:
+            List of dicts with keys: id, project_id, order_index, text, status, created_at, done_at
+            Ordered by order_index ASC
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, project_id, order_index, text, status, created_at, done_at
+                FROM project_steps
+                WHERE project_id = ?
+                ORDER BY order_index ASC;
+                """,
+                (project_id,),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def delete_project_step(self, step_id: int) -> bool:
+        """
+        Delete a project step. If the step is active, automatically advances the project.
+        
+        Args:
+            step_id: Step ID to delete
+        
+        Returns:
+            True if step was deleted, False if not found
+        """
+        # Get step info first
+        step = await self.get_project_step(step_id)
+        if not step:
+            return False
+        
+        project_id = step['project_id']
+        is_active = step['status'] == 'active'
+        
+        # If active, advance first (this will handle the transition)
+        if is_active:
+            now = self._now_iso()
+            try:
+                await self.advance_project_step(step_id=step_id, now=now)
+            except ValueError:
+                # Step might have been deleted already, continue with deletion
+                pass
+        
+        # Delete the step
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                DELETE FROM project_steps
+                WHERE id = ?;
+                """,
+                (step_id,),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+    
+    async def cancel_project(self, project_id: int, now: str) -> bool:
+        """
+        Cancel a project by marking it as 'cancelled'.
+        This hides all steps from the active list.
+        
+        Args:
+            project_id: Project ID
+            now: ISO datetime string in UTC
+        
+        Returns:
+            True if project was cancelled, False if not found
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE projects
+                SET status = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                ('cancelled', now, project_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0

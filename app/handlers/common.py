@@ -35,6 +35,9 @@ class Flow(StatesGroup):
     waiting_schedule_custom_time = State()
     # Delete flow state
     waiting_delete_reason = State()
+    # Backlog project flow states
+    waiting_project_name = State()
+    waiting_project_steps = State()
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,8 @@ class CtxKeys:
     schedule_start_time: str = "schedule_start_time"
     # Delete flow keys
     delete_task_id: str = "delete_task_id"
+    # Backlog project flow keys
+    project_name: str = "project_name"
 
 
 async def _show_home_from_message(message: Message, repo: TasksRepo, state: FSMContext | None = None) -> None:
@@ -71,6 +76,7 @@ async def _show_home_from_message(message: Message, repo: TasksRepo, state: FSMC
     
     completed = await repo.list_completed_tasks(user_id=message.from_user.id, limit=3)
     active = await repo.list_tasks(user_id=message.from_user.id, limit=7)
+    active_steps = await repo.get_active_project_steps()
     daily_progress = await repo.get_daily_progress(user_id=message.from_user.id)
     
     # Add separator text between lists if both exist
@@ -78,7 +84,7 @@ async def _show_home_from_message(message: Message, repo: TasksRepo, state: FSMC
     if completed and active:
         header_text += "\n\n─────────────"
     
-    await message.answer(header_text, reply_markup=default_kb(completed, active))
+    await message.answer(header_text, reply_markup=default_kb(completed, active, active_steps))
 
 
 async def _show_home_from_cb(
@@ -96,6 +102,7 @@ async def _show_home_from_cb(
     
     completed = await repo.list_completed_tasks(user_id=cb.from_user.id, limit=3)
     active = await repo.list_tasks(user_id=cb.from_user.id, limit=7)
+    active_steps = await repo.get_active_project_steps()
     daily_progress = await repo.get_daily_progress(user_id=cb.from_user.id)
     
     # Add separator text between lists if both exist
@@ -109,13 +116,13 @@ async def _show_home_from_cb(
     
     if cb.message:
         try:
-            await cb.message.edit_text(header_text, reply_markup=default_kb(completed, active))
+            await cb.message.edit_text(header_text, reply_markup=default_kb(completed, active, active_steps))
         except TelegramBadRequest as e:
             # If message is not modified and we're forcing refresh, try with reply_markup only
             if "message is not modified" in str(e).lower() and force_refresh:
                 try:
                     # Force update by editing reply markup separately
-                    await cb.message.edit_reply_markup(reply_markup=default_kb(completed, active))
+                    await cb.message.edit_reply_markup(reply_markup=default_kb(completed, active, active_steps))
                 except Exception:
                     pass  # If still fails, just answer
             elif "message is not modified" in str(e).lower():

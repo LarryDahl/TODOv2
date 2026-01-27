@@ -36,23 +36,139 @@ async def cb_restore_completed(cb: CallbackQuery, state: FSMContext, repo: Tasks
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:done:"))
+@router.callback_query(F.data.startswith("task:done:") | F.data.startswith("t:") | F.data.startswith("ps:"))
 async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """
+    Unified handler for marking tasks and project steps as done.
+    Supports:
+    - task:done:<task_id> (existing format)
+    - t:<task_id> (new format)
+    - ps:<step_id> (project step format)
+    """
+    import logging
     from app.handlers.common import return_to_main_menu
     
-    parts = parse_callback_data(cb.data, 3)
-    task_id = parse_int_safe(parts[2]) if parts else None
+    callback_data = cb.data
     
-    if task_id is None:
-        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+    # Branch based on callback prefix
+    if callback_data.startswith("ps:"):
+        # Handle project step
+        parts = parse_callback_data(callback_data, 2)
+        step_id = parse_int_safe(parts[1]) if parts else None
+        
+        if step_id is None:
+            logging.warning(f"Invalid project step ID in callback: {callback_data}")
+            await return_to_main_menu(cb, repo, state=state, force_refresh=True)
+            return
+        
+        try:
+            now = repo._now_iso()
+            result = await repo.advance_project_step(step_id=step_id, now=now)
+            
+            # Log result for debugging (ignore return value except for logging)
+            logging.info(f"Project step {step_id} advanced: {result.get('action', 'unknown')}")
+            
+            # Always refresh list (idempotent: even if noop, refresh to show current state)
+            await return_to_main_menu(cb, repo, state=state, force_refresh=True)
+        except ValueError as e:
+            # Step not found or other validation error
+            logging.warning(f"Error advancing project step {step_id}: {e}")
+            await return_to_main_menu(cb, repo, state=state, force_refresh=True)
+        except Exception as e:
+            # Unexpected error - log and refresh without crashing
+            logging.error(f"Unexpected error advancing project step {step_id}: {e}", exc_info=True)
+            await return_to_main_menu(cb, repo, state=state, force_refresh=True)
+    
+    else:
+        # Handle task (both task:done: and t: formats)
+        if callback_data.startswith("task:done:"):
+            parts = parse_callback_data(callback_data, 3)
+            task_id = parse_int_safe(parts[2]) if parts else None
+        else:  # t: format
+            parts = parse_callback_data(callback_data, 2)
+            task_id = parse_int_safe(parts[1]) if parts else None
+        
+        if task_id is None:
+            await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+            await return_to_main_menu(cb, repo, state=state)
+            return
+        
+        success = await repo.complete_task(user_id=cb.from_user.id, task_id=task_id)
+        if success:
+            await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä merkitty tehdyksi", force_refresh=True)
+        else:
+            await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+            await return_to_main_menu(cb, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("p:"))
+async def cb_project_detail(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show project detail view with all steps"""
+    from app.ui import project_detail_kb, render_project_detail
+    
+    parts = parse_callback_data(cb.data, 2)
+    project_id = parse_int_safe(parts[1]) if parts else None
+    
+    if project_id is None:
+        await cb.answer("Virheellinen projektin-id.", show_alert=True)
         await return_to_main_menu(cb, repo, state=state)
         return
+    
+    # Get project and steps
+    project = await repo.get_project(project_id)
+    if not project:
+        await cb.answer("Projektia ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    steps = await repo.get_project_steps(project_id)
+    
+    if cb.message:
+        text = render_project_detail(project, steps)
+        await cb.message.edit_text(text, reply_markup=project_detail_kb())
+    await cb.answer()
 
-    success = await repo.complete_task(user_id=cb.from_user.id, task_id=task_id)
+
+@router.callback_query(F.data.startswith("ps:del:"))
+async def cb_delete_project_step(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Delete a project step. If active, automatically advances the project."""
+    parts = parse_callback_data(cb.data, 3)
+    step_id = parse_int_safe(parts[2]) if parts else None
+    
+    if step_id is None:
+        await cb.answer("Virheellinen askel-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Delete step (automatically advances if active)
+    success = await repo.delete_project_step(step_id=step_id)
+    
     if success:
-        await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä merkitty tehdyksi", force_refresh=True)
+        await return_to_main_menu(cb, repo, state=state, answer_text="Askel poistettu", force_refresh=True)
     else:
-        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await cb.answer("Askelia ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+
+
+@router.callback_query(F.data.startswith("p:del:"))
+async def cb_cancel_project(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Cancel a project - marks it as cancelled and hides all steps"""
+    parts = parse_callback_data(cb.data, 3)
+    project_id = parse_int_safe(parts[2]) if parts else None
+    
+    if project_id is None:
+        await cb.answer("Virheellinen projektin-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    
+    # Cancel project
+    now = repo._now_iso()
+    success = await repo.cancel_project(project_id=project_id, now=now)
+    
+    if success:
+        await return_to_main_menu(cb, repo, state=state, answer_text="Projekti peruutettu", force_refresh=True)
+    else:
+        await cb.answer("Projektia ei löytynyt.", show_alert=True)
         await return_to_main_menu(cb, repo, state=state)
 
 
