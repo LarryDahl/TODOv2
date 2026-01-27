@@ -7,102 +7,53 @@ from app.db import Task
 from app.priority import render_title_with_priority
 
 
+# UI text constants for projects
+# These are user-facing labels that can be changed here centrally
+UI_PROJECT_SINGULAR = "Projekti"
+UI_PROJECT_PLURAL = "Projektit"
+UI_ADD_PROJECT = "Lisää projekti"
+
+
 def _label(text: str, max_len: int = 48) -> str:
     t = text.strip()
     return t[:max_len] + ("…" if len(t) > max_len else "")
 
 
-def default_kb(completed_tasks: list[dict], active_tasks: list[Task], active_steps: list[dict] | None = None) -> InlineKeyboardMarkup:
-    """Default view: 3 completed tasks, 7 active tasks, active project steps, settings/stats, edit/add buttons"""
+# DEPRECATED: default_kb() removed - use build_home_keyboard() instead
+# This function was replaced by build_home_keyboard() which is called via render_home_message()
+# in app/handlers/common.py. All handlers should use return_to_main_menu() which calls
+# render_home_message() -> build_home_keyboard().
+
+
+def settings_kb(show_done: bool = True) -> InlineKeyboardMarkup:
+    """
+    Settings view: timezone, show done toggle, export DB, back.
+    
+    Args:
+        show_done: Current value of show_done_in_home setting
+    """
     kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="Aseta aikavyöhyke", callback_data="settings:timezone"))
     
-    # 3 most recently completed tasks (reverse order: oldest first, newest last)
-    # So newest is at bottom: tehty tehtävä 3, tehty tehtävä 2, tehty tehtävä 1
-    # Use check mark to indicate completed tasks
-    for i, comp_task in enumerate(reversed(completed_tasks), 1):
-        task_text = _label(comp_task['text'], 47)
-        kb.row(
-            InlineKeyboardButton(
-                text=f"✓ {task_text}",
-                callback_data=f"completed:restore:{comp_task['id']}",
-            )
-        )
+    # Toggle button shows current state
+    toggle_text = "✅ Näytä tehdyt päänäkymässä" if show_done else "❌ Älä näytä tehtyjä päänäkymässä"
+    kb.row(InlineKeyboardButton(text=toggle_text, callback_data="settings:toggle_show_done"))
     
-    # Separator between lists (text indicator, not a button)
-    if completed_tasks and (active_tasks or (active_steps and len(active_steps) > 0)):
-        # Use a non-clickable separator - we'll add this in the message text instead
-        pass
-    
-    # 7 next active tasks
-    for task in active_tasks[:7]:
-        # Render title with priority indicators (!)
-        rendered_title = render_title_with_priority(task.text, task.priority)
-        task_text = _label(rendered_title, 48)
-        kb.row(
-            InlineKeyboardButton(
-                text=task_text,
-                callback_data=f"task:done:{task.id}",
-            )
-        )
-    
-    # Active project steps (append after tasks)
-    if active_steps:
-        for step in active_steps:
-            project_title = step.get('project_title', '')
-            step_text = step.get('text', '')
-            order_index = step.get('order_index', 0)
-            total_steps = step.get('total_steps', 0)
-            step_id = step.get('id', 0)
-            project_id = step.get('project_id', 0)
-            
-            # Format: "[PRJ] <Project title>: <step text> [i/N]"
-            display_text = f"[PRJ] {project_title}: {step_text} [{order_index}/{total_steps}]"
-            display_text = _label(display_text, 48)
-            
-            # Two buttons: step action and project view
-            kb.row(
-                InlineKeyboardButton(
-                    text=display_text,
-                    callback_data=f"ps:{step_id}",
-                ),
-                InlineKeyboardButton(
-                    text="📋",
-                    callback_data=f"p:{project_id}",
-                ),
-                width=2,
-            )
-    
-    # Bottom buttons: lisää, backlog, tehty, poista, muokkaa
-    kb.row(
-        InlineKeyboardButton(text="lisää", callback_data="view:add"),
-        InlineKeyboardButton(text="backlog", callback_data="view:add_backlog"),
-        InlineKeyboardButton(text="tehty", callback_data="view:done"),
-        InlineKeyboardButton(text="poista", callback_data="view:deleted"),
-        width=4,
-    )
-    kb.row(
-        InlineKeyboardButton(text="muokkaa", callback_data="view:edit"),
-    )
-    
-    # Bottom buttons: asetukset, tilastot, päivitä
-    kb.row(
-        InlineKeyboardButton(text="asetukset", callback_data="view:settings"),
-        InlineKeyboardButton(text="tilastot", callback_data="view:stats"),
-        InlineKeyboardButton(text="päivitä", callback_data="view:refresh"),
-        width=3,
-    )
-    
-    # Suggestions button
-    kb.row(InlineKeyboardButton(text="Ehdotukset", callback_data="view:suggestions"))
-    
+    kb.row(InlineKeyboardButton(text="Export DB", callback_data="settings:export_db"))
+    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
-def settings_kb() -> InlineKeyboardMarkup:
-    """Settings view: nollaa, takaisin"""
+def settings_timezone_kb() -> InlineKeyboardMarkup:
+    """Timezone selection keyboard"""
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="nollaa", callback_data="settings:reset"))
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    # Common timezones
+    kb.row(InlineKeyboardButton(text="Europe/Helsinki", callback_data="settings:tz:Europe/Helsinki"))
+    kb.row(InlineKeyboardButton(text="UTC", callback_data="settings:tz:UTC"))
+    kb.row(InlineKeyboardButton(text="Europe/London", callback_data="settings:tz:Europe/London"))
+    kb.row(InlineKeyboardButton(text="America/New_York", callback_data="settings:tz:America/New_York"))
+    kb.row(InlineKeyboardButton(text="Asia/Tokyo", callback_data="settings:tz:Asia/Tokyo"))
+    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -123,7 +74,7 @@ def edit_kb(tasks: list[Task]) -> InlineKeyboardMarkup:
             )
         )
     
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -139,7 +90,7 @@ def task_action_kb(task: Task) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="⏰ Lisää deadline", callback_data=f"task:deadline:{task.id}"))
     kb.row(InlineKeyboardButton(text="🗓 Lisää schedule", callback_data=f"task:schedule:{task.id}"))
     kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"))
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:edit"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"))
     
     return kb.as_markup()
 
@@ -177,13 +128,32 @@ def task_edit_menu_kb(task: Task) -> InlineKeyboardMarkup:
     # Delete action
     kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"task:del:{task.id}"))
     
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:edit"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"))
     
     return kb.as_markup()
 
 
+def stats_menu_kb() -> InlineKeyboardMarkup:
+    """
+    Stats main menu: all time stats, AI analysis, reset stats.
+    
+    Callback data scheme:
+    - view:stats -> opens this menu
+    - stats:all_time -> show all time statistics
+    - stats:ai -> show AI analysis options
+    - stats:reset -> show reset confirmation
+    - view:home -> return to home
+    """
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="Stats all time", callback_data="stats:all_time"))
+    kb.row(InlineKeyboardButton(text="AI-analyysi", callback_data="stats:ai"))
+    kb.row(InlineKeyboardButton(text="Reset stats", callback_data="stats:reset"))
+    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
+    return kb.as_markup()
+
+
 def stats_kb() -> InlineKeyboardMarkup:
-    """Statistics view: analysis buttons and back"""
+    """Statistics view: analysis buttons and back (legacy, kept for compatibility)"""
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text="analyysi 1vko", callback_data="stats:7"),
@@ -196,20 +166,92 @@ def stats_kb() -> InlineKeyboardMarkup:
         width=2,
     )
     kb.row(InlineKeyboardButton(text="analyysi 1v", callback_data="stats:365"))
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="home:home"))
+    return kb.as_markup()
+
+
+def stats_ai_period_kb() -> InlineKeyboardMarkup:
+    """AI analysis period selection"""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="1 pv", callback_data="stats:ai:1"))
+    kb.row(InlineKeyboardButton(text="1 vk", callback_data="stats:ai:7"))
+    kb.row(InlineKeyboardButton(text="1 kk", callback_data="stats:ai:30"))
+    kb.row(InlineKeyboardButton(text="1 v", callback_data="stats:ai:365"))
+    kb.row(InlineKeyboardButton(text="Muu", callback_data="stats:ai:custom"))
+    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
+    return kb.as_markup()
+
+
+def stats_reset_confirm_kb() -> InlineKeyboardMarkup:
+    """Reset stats confirmation"""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="Varmista reset", callback_data="stats:reset_confirm"))
+    kb.row(InlineKeyboardButton(text="Peru", callback_data="view:stats"))
+    return kb.as_markup()
+
+
+def plus_menu_kb() -> InlineKeyboardMarkup:
+    """
+    Plus menu: main options for adding tasks/projects or editing.
+    
+    Callback data scheme (documented):
+    
+    Main menu:
+    - view:add / home:plus -> opens this plus menu
+    
+    Plus menu options:
+    - add:task_type -> opens task type submenu (Regular/Ajastettu/Deadline)
+    - add:project -> start project creation flow (same as view:add_backlog)
+    - home:edit -> open edit tasks view (same as view:edit)
+    - view:home -> return to home
+    
+    Task type submenu:
+    - add:regular -> start regular task flow (direct text input, no type/difficulty/category)
+    - add:scheduled -> start scheduled flow (date -> time -> text)
+    - add:deadline -> start deadline flow (date -> time -> text)
+    - home:plus -> back to plus menu
+    
+    Scheduled/Deadline flow:
+    - add:scheduled:date:<offset> -> select date (0=today, 1=tomorrow, etc.)
+    - add:scheduled:time:<time> -> select time (09:00, 12:00, custom, back)
+    - add:deadline:date:<offset> -> select date (0=today, 1=tomorrow, etc., or none)
+    - add:deadline:time:<time> -> select time (09:00, 12:00, custom, back)
+    
+    FSM states:
+    - waiting_new_task_text -> for regular tasks (adds immediately)
+    - waiting_deadline_text -> for deadline tasks (after date/time selection)
+    - waiting_scheduled_text -> for scheduled tasks (after date/time selection)
+    - waiting_task_deadline -> custom time input for deadline
+    - waiting_task_scheduled -> custom time input for scheduled
+    
+    Note: "vapaa viesti = uusi tehtävä" only works when user is NOT in any FSM state.
+    When in FSM state (waiting_new_task_text, waiting_deadline_text, etc.), text is treated as input.
+    """
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="Lisää tehtävä", callback_data="add:task_type"))
+    kb.row(InlineKeyboardButton(text=UI_ADD_PROJECT, callback_data="add:project"))
+    kb.row(InlineKeyboardButton(text="Muokkaa tehtäviä", callback_data="home:edit"))
+    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
 def add_task_type_kb() -> InlineKeyboardMarkup:
-    """Add task: type selection"""
+    """
+    Task type selection submenu (from plus menu).
+    
+    Callback data scheme:
+    - add:task_type -> opens this menu
+    - add:regular -> start regular task flow (text input, no type/difficulty/category)
+    - add:scheduled -> start scheduled flow (date -> time -> text)
+    - add:deadline -> start deadline flow (date -> time -> text)
+    - home:plus -> back to plus menu
+    - view:home -> return to home
+    """
     kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="deadline", callback_data="add:type:deadline"),
-        InlineKeyboardButton(text="scheduled", callback_data="add:type:scheduled"),
-        InlineKeyboardButton(text="regular", callback_data="add:type:regular"),
-        width=3,
-    )
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="Regular", callback_data="add:regular"))
+    kb.row(InlineKeyboardButton(text="Ajastettu", callback_data="add:scheduled"))
+    kb.row(InlineKeyboardButton(text="Deadline", callback_data="add:deadline"))
+    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -223,7 +265,7 @@ def add_task_difficulty_kb() -> InlineKeyboardMarkup:
         width=3,
     )
     kb.row(InlineKeyboardButton(text="muu %", callback_data="add:difficulty:custom"))
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -245,7 +287,7 @@ def add_task_category_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="skip", callback_data="add:category:"),
         width=2,
     )
-    kb.row(InlineKeyboardButton(text="takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -256,10 +298,10 @@ def render_progress_bar(progress_percent: int) -> str:
     return "█" * filled + "░" * empty + f" {progress_percent}%"
 
 
-def render_default_header(daily_progress: int) -> str:
-    """Render default view header with progress bar"""
-    progress_bar = render_progress_bar(daily_progress)
-    return f"{progress_bar}\n\nTehtävälista\n\nKlikkaa tehtävää merkataksesi sen suoritetuksi.\nKlikkaa tehtyä tehtävää palauttaaksesi sen listalle."
+# DEPRECATED: render_default_header() removed - use render_home_text() instead
+# This function was replaced by render_home_text() which is called via render_home_message()
+# in app/handlers/common.py. All handlers should use return_to_main_menu() which calls
+# render_home_message() -> render_home_text().
 
 
 def render_home_text(
@@ -386,18 +428,46 @@ def build_home_keyboard(
     
     # 4) Bottom row: [+][stats][settings][refresh]
     kb.row(
-        InlineKeyboardButton(text="+", callback_data="view:add"),
-        InlineKeyboardButton(text="stats", callback_data="view:stats"),
-        InlineKeyboardButton(text="settings", callback_data="view:settings"),
-        InlineKeyboardButton(text="refresh", callback_data="view:refresh"),
+        InlineKeyboardButton(text="+", callback_data="home:plus"),
+        InlineKeyboardButton(text="stats", callback_data="view:stats"),  # Legacy, kept for compatibility
+        InlineKeyboardButton(text="settings", callback_data="view:settings"),  # Legacy, kept for compatibility
+        InlineKeyboardButton(text="refresh", callback_data="home:refresh"),
         width=4,
     )
     
     return kb.as_markup()
 
 
-def render_settings_header() -> str:
-    return "Asetukset\n\nnollaa - Poistaa kaikki tehtävät ja tilastot"
+def render_settings_header(settings: dict) -> str:
+    """
+    Render settings header with current values.
+    
+    Args:
+        settings: Dict with keys: timezone, show_done_in_home
+    """
+    timezone = settings.get('timezone', 'Europe/Helsinki')
+    show_done = settings.get('show_done_in_home', True)
+    
+    lines = ["⚙️ Asetukset", ""]
+    lines.append(f"🌍 Aikavyöhyke: {timezone}")
+    lines.append(f"✅ Näytä tehdyt: {'Kyllä' if show_done else 'Ei'}")
+    
+    return "\n".join(lines)
+
+
+def render_timezone_selection_header() -> str:
+    """Header for timezone selection"""
+    return "Aseta aikavyöhyke\n\nValitse aikavyöhyke:"
+
+
+def render_timezone_set(timezone: str) -> str:
+    """Message when timezone is set"""
+    return f"✅ Aikavyöhyke asetettu: {timezone}"
+
+
+def render_export_db_placeholder() -> str:
+    """Placeholder message for DB export"""
+    return "Export DB\n\nTulossa myöhemmin.\n\nTämä toiminto antaa sinun ladata tietokantatiedoston Telegramiin."
 
 
 def render_edit_header() -> str:
@@ -431,8 +501,71 @@ def render_stats_header(stats: dict) -> str:
     return f"Tilastot - {period}\n\n✅ Tehty: {completed}\n❌ Poistettu: {deleted}\n📋 Aktiivisia: {active}"
 
 
+def render_stats_menu_header() -> str:
+    """Header for stats main menu"""
+    return "Tilastot\n\nValitse toiminto:"
+
+
+def render_all_time_stats(stats: dict) -> str:
+    """
+    Render all time statistics.
+    
+    Args:
+        stats: Dict with keys: completed_count, active_count, deleted_count, cancelled_count,
+              done_today (optional), done_this_week (optional)
+    """
+    lines = ["📊 Tilastot - Kaikki ajat", ""]
+    
+    lines.append(f"✅ Tehty: {stats.get('completed_count', 0)}")
+    lines.append(f"📋 Aktiivisia: {stats.get('active_count', 0)}")
+    lines.append(f"❌ Poistettu: {stats.get('deleted_count', 0)}")
+    
+    # Cancelled count (for projects)
+    cancelled = stats.get('cancelled_count', 0)
+    if cancelled > 0:
+        lines.append(f"🚫 Peruutettu: {cancelled}")
+    
+    # Today/this week stats if available
+    done_today = stats.get('done_today')
+    done_this_week = stats.get('done_this_week')
+    
+    if done_today is not None or done_this_week is not None:
+        lines.append("")
+        if done_today is not None:
+            lines.append(f"✅ Tänään: {done_today}")
+        if done_this_week is not None:
+            lines.append(f"✅ Tällä viikolla: {done_this_week}")
+    
+    return "\n".join(lines)
+
+
+def render_ai_analysis_header() -> str:
+    """Header for AI analysis period selection"""
+    return "AI-analyysi\n\nValitse ajanjakso analyysille:"
+
+
+def render_ai_analysis_disabled() -> str:
+    """Message when AI analysis is disabled"""
+    return "AI-analyysi ei käytössä\n\nLisää OPENAI_API_KEY .env-tiedostoon käyttääksesi AI-analyysiä."
+
+
+def render_ai_analysis_placeholder(period: str) -> str:
+    """Placeholder message for AI analysis (not yet implemented)"""
+    return f"AI-analyysi ei käytössä (disabled)\n\nAjanjakso: {period}\n\nAI-analyysi toteutetaan myöhemmin."
+
+
+def render_reset_stats_confirm() -> str:
+    """Confirmation message for resetting stats"""
+    return "Resetoi tilastot?\n\nTämä poistaa kaikki tilastot ja lokit, mutta EI itse tehtäviä.\n\nHaluatko varmasti jatkaa?"
+
+
+def render_plus_menu_header() -> str:
+    """Header for plus menu"""
+    return "Valitse toiminto:"
+
+
 def render_add_type_header() -> str:
-    return "Lisää tehtävä\n\nValitse tehtävätyyppi:\n• deadline - määräaikainen tehtävä\n• scheduled - ajastettu tehtävä\n• regular - tavallinen tehtävä"
+    return "Lisää tehtävä\n\nValitse tehtävätyyppi:\n• Regular - tavallinen tehtävä\n• Ajastettu - ajastettu tehtävä\n• Deadline - määräaikainen tehtävä"
 
 
 def render_add_difficulty_header() -> str:
@@ -466,7 +599,7 @@ def date_picker_kb(prefix: str, include_none: bool = True) -> InlineKeyboardMark
             callback_data=f"{prefix}:{i}"
         ))
     
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -502,7 +635,7 @@ def schedule_type_kb() -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="Tietty aika", callback_data="schedule:type:at_time"))
     kb.row(InlineKeyboardButton(text="Aikaväli", callback_data="schedule:type:time_range"))
     kb.row(InlineKeyboardButton(text="Koko päivä", callback_data="schedule:type:all_day"))
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -538,7 +671,7 @@ def done_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup:
     if len(tasks) >= 50:
         kb.row(InlineKeyboardButton(text="📄 Näytä lisää", callback_data=f"done:page:{offset + 50}"))
     
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -558,7 +691,7 @@ def deleted_tasks_kb(tasks: list[dict], offset: int = 0) -> InlineKeyboardMarkup
     if len(tasks) >= 50:
         kb.row(InlineKeyboardButton(text="📄 Näytä lisää", callback_data=f"deleted:page:{offset + 50}"))
     
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin tehtäviin", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -595,19 +728,19 @@ def suggestions_kb(suggestions: list[dict]) -> InlineKeyboardMarkup:
                 width=2,
             )
     
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"))
     return kb.as_markup()
 
 
 def render_suggestions_header(count: int) -> str:
     """Render suggestions view header"""
-    return f"💡 Ehdotukset\n\n{count} ehdotusta backlogista.\n\nValitse 'Lisää tehtävälistaan' lisätäksesi tehtävän takaisin listalle."
+    return f"💡 Ehdotukset\n\n{count} ehdotusta {UI_PROJECT_PLURAL.lower()}sta.\n\nValitse 'Lisää tehtävälistaan' lisätäksesi tehtävän takaisin listalle."
 
 
 def project_detail_kb() -> InlineKeyboardMarkup:
     """Project detail view keyboard with back button"""
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin listaan", callback_data="view:home"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin listaan", callback_data="home:home"))
     return kb.as_markup()
 
 
@@ -616,7 +749,7 @@ def render_project_detail(project: dict, steps: list[dict]) -> str:
     Render project detail view with all steps and their statuses.
     
     Args:
-        project: Dict with keys: id, title, status, current_step_order, created_at, updated_at
+        project: Dict with keys: id, title, status, current_step_order, created_at, updated_at, completed_at
         steps: List of step dicts with keys: id, project_id, order_index, text, status, created_at, done_at
     
     Returns:
@@ -652,5 +785,71 @@ def render_project_detail(project: dict, steps: list[dict]) -> str:
             status_label = "[PENDING]"
         
         lines.append(f"{status_label} {step_text}")
+    
+    return "\n".join(lines)
+
+
+def render_project_completion_summary(project: dict, steps: list[dict]) -> str:
+    """
+    Render completion summary when a project is finished.
+    
+    Args:
+        project: Dict with keys: id, title, status, created_at, completed_at
+        steps: List of step dicts (all should be completed)
+    
+    Returns:
+        Formatted text with project completion summary
+    """
+    from datetime import datetime
+    
+    project_title = project.get('title', 'Unknown Project')
+    created_at = project.get('created_at')
+    completed_at = project.get('completed_at')
+    total_steps = len(steps)
+    
+    lines = [f"✅ {project_title} valmis", ""]
+    
+    # Calculate duration
+    if created_at and completed_at:
+        try:
+            created_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            completed_dt = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+            duration = completed_dt - created_dt
+            
+            # Format duration nicely
+            days = duration.days
+            hours, remainder = divmod(duration.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            if days > 0:
+                duration_str = f"{days} päivää"
+                if hours > 0:
+                    duration_str += f" {hours} tuntia"
+            elif hours > 0:
+                duration_str = f"{hours} tuntia"
+                if minutes > 0:
+                    duration_str += f" {minutes} minuuttia"
+            else:
+                duration_str = f"{minutes} minuuttia"
+            
+            lines.append(f"Kesto: {duration_str}")
+        except (ValueError, AttributeError):
+            # Fallback if date parsing fails
+            lines.append("Kesto: laskettu")
+    else:
+        lines.append("Kesto: ei saatavilla")
+    
+    # Steps count
+    lines.append(f"Askeleita: {total_steps}")
+    
+    # Completion timestamp (optional, as requested)
+    if completed_at:
+        try:
+            completed_dt = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+            # Format as readable date/time
+            formatted_time = completed_dt.strftime("%Y-%m-%d %H:%M")
+            lines.append(f"Valmistunut: {formatted_time}")
+        except (ValueError, AttributeError):
+            pass
     
     return "\n".join(lines)

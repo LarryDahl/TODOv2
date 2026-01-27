@@ -15,7 +15,8 @@ from app.constants import (
     TASK_ACTION_DELETED,
 )
 from app.priority import parse_priority
-from app.priority_compute import compute_deadline_priority, compute_schedule_priority
+# Note: compute_deadline_priority and compute_schedule_priority were replaced by compute_priority
+# Import is done inline where needed to avoid circular imports
 
 
 @dataclass(frozen=True)
@@ -26,12 +27,14 @@ class Task:
     task_type: str  # 'deadline', 'scheduled', 'regular'
     difficulty: int  # percentage (1, 5, 10, or custom)
     category: str  # 'liikunta', 'arki', 'opiskelu', 'suhteet', 'muu', ''
-    deadline: Optional[str]  # ISO datetime for deadline (latest-by), UTC
-    scheduled_time: Optional[str]  # ISO datetime for scheduled tasks (deprecated, use schedule_kind/schedule_json)
+    deadline: Optional[str]  # ISO datetime for deadline (latest-by), UTC (legacy, use deadline_time)
+    scheduled_time: Optional[str]  # ISO datetime for scheduled tasks (deprecated, use schedule_kind/schedule_json or scheduled_time)
     priority: int  # 0 to 5, derived from trailing '!' in title
     priority_source: str  # 'bang_suffix' or future AI-based sources
     schedule_kind: Optional[str]  # 'none' | 'at_time' | 'time_range' | 'all_day' | None
     schedule_json: Optional[str]  # JSON string with schedule details
+    deadline_time: Optional[str]  # ISO datetime for deadline (simplified, for priority computation), UTC
+    scheduled_time_new: Optional[str]  # ISO datetime for scheduled time (simplified, for priority computation), UTC
     created_at: str
     updated_at: str
 
@@ -64,6 +67,8 @@ class TasksRepo:
                     priority_source TEXT NOT NULL DEFAULT 'bang_suffix',
                     schedule_kind TEXT,
                     schedule_json TEXT,
+                    deadline_time TEXT,
+                    scheduled_time_new TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -89,6 +94,11 @@ class TasksRepo:
                 await db.execute("ALTER TABLE tasks ADD COLUMN schedule_kind TEXT;")
             if 'schedule_json' not in columns:
                 await db.execute("ALTER TABLE tasks ADD COLUMN schedule_json TEXT;")
+            # New simplified time fields for priority computation
+            if 'deadline_time' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN deadline_time TEXT;")
+            if 'scheduled_time_new' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN scheduled_time_new TEXT;")
             
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);")
 
@@ -134,6 +144,18 @@ class TasksRepo:
                 """
             )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_action_log_user_at ON action_log(user_id, at);")
+            
+            # User settings table (timezone, show_done, etc.)
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER PRIMARY KEY,
+                    timezone TEXT NOT NULL DEFAULT 'Europe/Helsinki',
+                    show_done_in_home BOOLEAN NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_action_log_action ON action_log(action);")
             
             # Projects table for backlog projects with ordered steps
@@ -145,10 +167,17 @@ class TasksRepo:
                     status TEXT NOT NULL,
                     current_step_order INTEGER,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
                 );
                 """
             )
+            
+            # Migration: Add completed_at column if it doesn't exist
+            cursor = await db.execute("PRAGMA table_info(projects)")
+            project_columns = [row[1] for row in await cursor.fetchall()]
+            if 'completed_at' not in project_columns:
+                await db.execute("ALTER TABLE projects ADD COLUMN completed_at TEXT;")
             
             # Project steps table
             await db.execute(
@@ -179,7 +208,7 @@ class TasksRepo:
             # Fetch all tasks to ensure consistent sorting across different views
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ?;
                 """,
@@ -188,26 +217,28 @@ class TasksRepo:
             tasks = [Task(**dict(r)) for r in await cur.fetchall()]
             
             # Sort by priority rules (explicit ordering):
-            # 1. Higher '!' priority first (base priority from parse_priority, 0-5)
-            # 2. Then deadline/schedule urgency (computed boost from deadline/schedule proximity)
-            # 3. Then creation time (older first for same priority)
+            # Uses simplified priority computation with deadline_time and scheduled_time_new
+            # 1. Effective priority (base_priority + time_boost) - higher first
+            # 2. Creation time (older first for same priority)
             now = datetime.now(timezone.utc)
             
             def sort_key(task: Task) -> tuple:
-                # Primary: base priority from '!' (higher first)
-                base_prio = task.priority
+                # Use simplified priority computation with deadline_time and scheduled_time_new
+                from app.priority_compute import compute_priority
                 
-                # Secondary: computed urgency boost (deadline/schedule)
-                # Extract just the boost part (without base priority)
-                deadline_boost = compute_deadline_priority(task.deadline, now)
-                schedule_boost = compute_schedule_priority(task.schedule_kind, task.schedule_json, now)
-                urgency_boost = deadline_boost + schedule_boost
+                # Compute effective priority using new simplified logic
+                effective_priority = compute_priority(
+                    base_priority=task.priority,
+                    scheduled_time=task.scheduled_time_new,
+                    deadline_time=task.deadline_time,
+                    now=now
+                )
                 
                 # Tertiary: creation time (older first = ascending)
                 created_at = task.created_at
                 
                 # Return tuple for sorting: negative for descending, positive for ascending
-                return (-base_prio, -urgency_boost, created_at)
+                return (-effective_priority, created_at)
             
             tasks.sort(key=sort_key)
             return tasks[:limit]
@@ -274,13 +305,18 @@ class TasksRepo:
         # Parse priority from trailing exclamation marks
         clean_title, priority = parse_priority(text)
         now = self._now_iso()
+        
+        # Set deadline_time and scheduled_time_new for simplified priority computation
+        deadline_time = deadline  # Use deadline as deadline_time
+        scheduled_time_new = scheduled_time  # Use scheduled_time as scheduled_time_new
+        
         async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', None, None, now, now),
+                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', None, None, deadline_time, scheduled_time_new, now, now),
             )
             await db.commit()
             task_id = int(cur.lastrowid)
@@ -300,7 +336,7 @@ class TasksRepo:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ? AND id = ?;
                 """,
@@ -751,11 +787,227 @@ class TasksRepo:
             return progress
     
     async def reset_all_data(self, user_id: int) -> None:
-        """Reset all data for a user"""
+        """Reset all data for a user (including tasks)"""
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute("DELETE FROM tasks WHERE user_id = ?;", (user_id,))
             await db.execute("DELETE FROM task_events WHERE user_id = ?;", (user_id,))
+            await db.execute("DELETE FROM action_log WHERE user_id = ?;", (user_id,))
+            await db.execute("DELETE FROM suggestion_log WHERE user_id = ?;", (user_id,))
             await db.commit()
+    
+    async def reset_stats(self, user_id: int) -> bool:
+        """
+        Reset only statistics and logs for a user (NOT tasks).
+        
+        Deletes:
+        - task_events (completion/deletion logs)
+        - action_log (action history)
+        - suggestion_log (suggestion tracking)
+        
+        Does NOT delete:
+        - tasks (active tasks remain)
+        - projects (projects remain)
+        
+        Args:
+            user_id: User ID
+        
+        Returns:
+            True if successful
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM task_events WHERE user_id = ?;", (user_id,))
+            await db.execute("DELETE FROM action_log WHERE user_id = ?;", (user_id,))
+            await db.execute("DELETE FROM suggestion_log WHERE user_id = ?;", (user_id,))
+            await db.commit()
+            return True
+    
+    async def get_all_time_stats(self, user_id: int) -> dict:
+        """
+        Get all time statistics for a user.
+        
+        Returns:
+            Dict with keys:
+            - completed_count: Total completed tasks (from task_events)
+            - active_count: Current active tasks
+            - deleted_count: Total deleted tasks (from task_events)
+            - cancelled_count: Total cancelled projects
+            - done_today: Completed tasks today (optional, None if no timestamps)
+            - done_this_week: Completed tasks this week (optional, None if no timestamps)
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Total completed tasks
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM task_events
+                WHERE user_id = ? AND action = ?;
+                """,
+                (user_id, TASK_ACTION_COMPLETED),
+            )
+            completed_count = (await cur.fetchone())['count']
+            
+            # Total deleted tasks
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM task_events
+                WHERE user_id = ? AND action = ?;
+                """,
+                (user_id, TASK_ACTION_DELETED),
+            )
+            deleted_count = (await cur.fetchone())['count']
+            
+            # Current active tasks
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM tasks
+                WHERE user_id = ?;
+                """,
+                (user_id,),
+            )
+            active_count = (await cur.fetchone())['count']
+            
+            # Cancelled projects
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM projects
+                WHERE status = 'cancelled';
+                """,
+            )
+            cancelled_count = (await cur.fetchone())['count']
+            
+            # Done today (if timestamps available)
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM task_events
+                WHERE user_id = ? AND action = ?
+                AND date(at) = date('now');
+                """,
+                (user_id, TASK_ACTION_COMPLETED),
+            )
+            done_today = (await cur.fetchone())['count']
+            
+            # Done this week (last 7 days)
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM task_events
+                WHERE user_id = ? AND action = ?
+                AND datetime(at) >= datetime('now', '-7 days');
+                """,
+                (user_id, TASK_ACTION_COMPLETED),
+            )
+            done_this_week = (await cur.fetchone())['count']
+            
+            return {
+                'completed_count': completed_count,
+                'active_count': active_count,
+                'deleted_count': deleted_count,
+                'cancelled_count': cancelled_count,
+                'done_today': done_today,
+                'done_this_week': done_this_week,
+            }
+    
+    async def get_user_settings(self, user_id: int) -> dict:
+        """
+        Get user settings (timezone, show_done_in_home, etc.).
+        
+        Returns:
+            Dict with keys:
+            - timezone: str (default: 'Europe/Helsinki')
+            - show_done_in_home: bool (default: True)
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT timezone, show_done_in_home
+                FROM user_settings
+                WHERE user_id = ?;
+                """,
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            
+            if row:
+                return {
+                    'timezone': row['timezone'],
+                    'show_done_in_home': bool(row['show_done_in_home']),
+                }
+            else:
+                # Return defaults if user has no settings
+                return {
+                    'timezone': 'Europe/Helsinki',
+                    'show_done_in_home': True,
+                }
+    
+    async def set_user_timezone(self, user_id: int, timezone: str) -> bool:
+        """
+        Set user timezone.
+        
+        Args:
+            user_id: User ID
+            timezone: Timezone string (e.g., 'Europe/Helsinki')
+        
+        Returns:
+            True if successful
+        """
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            # Use INSERT OR REPLACE to handle both new and existing users
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO user_settings (user_id, timezone, show_done_in_home, updated_at)
+                VALUES (?, ?, COALESCE((SELECT show_done_in_home FROM user_settings WHERE user_id = ?), 1), ?);
+                """,
+                (user_id, timezone, user_id, now),
+            )
+            await db.commit()
+            return True
+    
+    async def toggle_show_done_in_home(self, user_id: int) -> bool:
+        """
+        Toggle show_done_in_home setting for user.
+        
+        Args:
+            user_id: User ID
+        
+        Returns:
+            New value of show_done_in_home (True/False)
+        """
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            # Get current value
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT show_done_in_home
+                FROM user_settings
+                WHERE user_id = ?;
+                """,
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            
+            # Default is True if no settings exist
+            current_value = bool(row['show_done_in_home']) if row else True
+            new_value = not current_value
+            
+            # Update or insert
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO user_settings (user_id, timezone, show_done_in_home, updated_at)
+                VALUES (?, COALESCE((SELECT timezone FROM user_settings WHERE user_id = ?), 'Europe/Helsinki'), ?, ?);
+                """,
+                (user_id, user_id, new_value, now),
+            )
+            await db.commit()
+            return new_value
 
     async def delete_task_with_log(self, user_id: int, task_id: int, reason: str = "") -> bool:
         """
@@ -959,10 +1211,10 @@ class TasksRepo:
             cur = await db.execute(
                 """
                 UPDATE tasks
-                SET deadline = ?, updated_at = ?
+                SET deadline = ?, deadline_time = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?;
                 """,
-                (deadline_utc, now, task_id, user_id),
+                (deadline_utc, deadline_utc, now, task_id, user_id),
             )
             await db.commit()
             success = cur.rowcount > 0
@@ -1041,14 +1293,19 @@ class TasksRepo:
         now = self._now_iso()
         schedule_json_str = json.dumps(schedule_payload) if schedule_payload else None
         
+        # Extract scheduled_time_new for simplified priority computation
+        scheduled_time_new = None
+        if schedule_kind == 'at_time' and schedule_payload:
+            scheduled_time_new = schedule_payload.get('timestamp')
+        
         async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
                 """
                 UPDATE tasks
-                SET schedule_kind = ?, schedule_json = ?, updated_at = ?
+                SET schedule_kind = ?, schedule_json = ?, scheduled_time_new = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?;
                 """,
-                (schedule_kind, schedule_json_str, now, task_id, user_id),
+                (schedule_kind, schedule_json_str, scheduled_time_new, now, task_id, user_id),
             )
             await db.commit()
             success = cur.rowcount > 0
@@ -1474,10 +1731,10 @@ class TasksRepo:
                 await db.execute(
                     """
                     UPDATE projects
-                    SET status = ?, current_step_order = NULL, updated_at = ?
+                    SET status = ?, current_step_order = NULL, updated_at = ?, completed_at = ?
                     WHERE id = ?;
                     """,
-                    ('completed', now, project_id),
+                    ('completed', now, now, project_id),
                 )
                 
                 await db.commit()
@@ -1497,14 +1754,14 @@ class TasksRepo:
             project_id: Project ID
         
         Returns:
-            Dict with keys: id, title, status, current_step_order, created_at, updated_at
+            Dict with keys: id, title, status, current_step_order, created_at, updated_at, completed_at
             Returns None if project not found
         """
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT id, title, status, current_step_order, created_at, updated_at
+                SELECT id, title, status, current_step_order, created_at, updated_at, completed_at
                 FROM projects
                 WHERE id = ?;
                 """,

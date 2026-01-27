@@ -1,5 +1,15 @@
 """
 View handlers for navigation and display.
+
+ROUTER MAP:
+- home:home - Return to home view
+- home:refresh - Refresh home view (re-render existing message)
+- home:edit - Open edit tasks view
+- settings:* - Settings actions (see settings handlers)
+- stats:* - Statistics actions (see stats handlers)
+- view:* - Legacy view navigation (being phased out)
+- done:* - Completed tasks view
+- deleted:* - Deleted tasks view
 """
 from __future__ import annotations
 
@@ -18,7 +28,15 @@ from app.ui import (
     render_edit_header,
     render_settings_header,
     render_stats_header,
+    render_all_time_stats,
+    render_ai_analysis_header,
+    render_ai_analysis_disabled,
+    render_ai_analysis_placeholder,
+    render_reset_stats_confirm,
     settings_kb,
+    stats_ai_period_kb,
+    stats_menu_kb,
+    stats_reset_confirm_kb,
     stats_kb,
     task_action_kb,
 )
@@ -31,14 +49,18 @@ async def start(message: Message, state: FSMContext, repo: TasksRepo) -> None:
     await return_to_main_menu(message, repo, state=state)
 
 
-@router.callback_query(F.data == "view:home")
+@router.callback_query(F.data.in_(["view:home", "home:home"]))
 async def cb_home(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Return to home view"""
     await return_to_main_menu(cb, repo, state=state, force_refresh=True)
 
 
-@router.callback_query(F.data == "view:refresh")
+@router.callback_query(F.data.in_(["view:refresh", "home:refresh"]))
 async def cb_refresh(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    """Refresh the main menu task list to show latest changes and approaching deadlines"""
+    """
+    Refresh the main menu task list to show latest changes and approaching deadlines.
+    Re-renders existing message if possible.
+    """
     await return_to_main_menu(cb, repo, state=state, answer_text="Lista päivitetty", force_refresh=True)
 
 
@@ -49,10 +71,92 @@ async def cb_noop(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "view:settings")
 async def cb_settings(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open settings view"""
     await state.clear()
+    
+    settings = await repo.get_user_settings(user_id=cb.from_user.id)
+    
     if cb.message:
-        await cb.message.edit_text(render_settings_header(), reply_markup=settings_kb())
+        await cb.message.edit_text(
+            render_settings_header(settings),
+            reply_markup=settings_kb(show_done=settings.get('show_done_in_home', True))
+        )
     await cb.answer()
+
+
+@router.callback_query(F.data == "settings:timezone")
+async def cb_settings_timezone(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open timezone selection"""
+    from app.ui import settings_timezone_kb, render_timezone_selection_header
+    
+    await state.clear()
+    
+    if cb.message:
+        await cb.message.edit_text(
+            render_timezone_selection_header(),
+            reply_markup=settings_timezone_kb()
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("settings:tz:"))
+async def cb_settings_timezone_set(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Set user timezone"""
+    from app.ui import render_timezone_set, render_settings_header, settings_kb
+    
+    await state.clear()
+    
+    parts = cb.data.split(":", 2)
+    timezone = parts[2] if len(parts) > 2 else "Europe/Helsinki"
+    
+    success = await repo.set_user_timezone(user_id=cb.from_user.id, timezone=timezone)
+    
+    if cb.message:
+        if success:
+            # Refresh settings view
+            settings = await repo.get_user_settings(user_id=cb.from_user.id)
+            await cb.message.edit_text(
+                render_settings_header(settings),
+                reply_markup=settings_kb(show_done=settings.get('show_done_in_home', True))
+            )
+            await cb.answer(render_timezone_set(timezone))
+        else:
+            await cb.answer("Virhe: Aikavyöhykkeen asetus epäonnistui.", show_alert=True)
+
+
+@router.callback_query(F.data == "settings:toggle_show_done")
+async def cb_settings_toggle_show_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Toggle show_done_in_home setting"""
+    from app.ui import render_settings_header, settings_kb
+    
+    await state.clear()
+    
+    new_value = await repo.toggle_show_done_in_home(user_id=cb.from_user.id)
+    
+    if cb.message:
+        settings = await repo.get_user_settings(user_id=cb.from_user.id)
+        await cb.message.edit_text(
+            render_settings_header(settings),
+            reply_markup=settings_kb(show_done=new_value)
+        )
+        status = "näytetään" if new_value else "piilotettu"
+        await cb.answer(f"Tehdyt {status} päänäkymässä")
+
+
+@router.callback_query(F.data == "settings:export_db")
+async def cb_settings_export_db(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Export DB (placeholder)"""
+    from app.ui import render_export_db_placeholder, settings_kb
+    
+    await state.clear()
+    
+    if cb.message:
+        settings = await repo.get_user_settings(user_id=cb.from_user.id)
+        await cb.message.edit_text(
+            render_export_db_placeholder(),
+            reply_markup=settings_kb(show_done=settings.get('show_done_in_home', True))
+        )
+    await cb.answer("Tulossa myöhemmin")
 
 
 @router.callback_query(F.data == "settings:reset")
@@ -64,8 +168,9 @@ async def cb_reset(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> Non
     await cb.answer("Tiedot nollattu")
 
 
-@router.callback_query(F.data == "view:edit")
+@router.callback_query(F.data.in_(["view:edit", "home:edit"]))
 async def cb_edit_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open edit tasks view (from home or plus menu)"""
     await state.clear()
     tasks = await repo.list_tasks(user_id=cb.from_user.id)
     if cb.message:
@@ -184,14 +289,138 @@ async def cb_restore_deleted(cb: CallbackQuery, state: FSMContext, repo: TasksRe
 
 @router.callback_query(F.data == "view:stats")
 async def cb_stats_view(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open stats main menu"""
+    from app.ui import stats_menu_kb, render_stats_menu_header
+    
     await state.clear()
     if cb.message:
-        await cb.message.edit_text("Tilastot\n\nValitse ajanjakso analyysille.", reply_markup=stats_kb())
+        await cb.message.edit_text(render_stats_menu_header(), reply_markup=stats_menu_kb())
     await cb.answer()
+
+
+@router.callback_query(F.data == "stats:all_time")
+async def cb_stats_all_time(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show all time statistics"""
+    await state.clear()
+    
+    stats = await repo.get_all_time_stats(user_id=cb.from_user.id)
+    
+    if cb.message:
+        await cb.message.edit_text(
+            render_all_time_stats(stats),
+            reply_markup=stats_menu_kb()
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "stats:ai")
+async def cb_stats_ai(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show AI analysis period selection"""
+    import os
+    
+    await state.clear()
+    
+    # Check if OpenAI API key is configured
+    api_key = os.getenv("OPENAI_API_KEY")
+    
+    if cb.message:
+        if not api_key:
+            await cb.message.edit_text(
+                render_ai_analysis_disabled(),
+                reply_markup=stats_menu_kb()
+            )
+        else:
+            await cb.message.edit_text(
+                render_ai_analysis_header(),
+                reply_markup=stats_ai_period_kb()
+            )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("stats:ai:"))
+async def cb_stats_ai_period(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle AI analysis period selection"""
+    import os
+    
+    await state.clear()
+    
+    parts = cb.data.split(":", 2)
+    period_str = parts[2] if len(parts) > 2 else "7"
+    
+    # Check if OpenAI API key is configured
+    api_key = os.getenv("OPENAI_API_KEY")
+    
+    if not api_key:
+        if cb.message:
+            await cb.message.edit_text(
+                render_ai_analysis_disabled(),
+                reply_markup=stats_menu_kb()
+            )
+        await cb.answer()
+        return
+    
+    # Map period to readable text
+    period_map = {
+        "1": "1 päivä",
+        "7": "1 viikko",
+        "30": "1 kuukausi",
+        "365": "1 vuosi",
+        "custom": "Muu ajanjakso"
+    }
+    period_text = period_map.get(period_str, f"{period_str} päivää")
+    
+    # Placeholder implementation (AI analysis not yet implemented)
+    if cb.message:
+        await cb.message.edit_text(
+            render_ai_analysis_placeholder(period_text),
+            reply_markup=stats_menu_kb()
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "stats:reset")
+async def cb_stats_reset(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show reset stats confirmation"""
+    await state.clear()
+    
+    if cb.message:
+        await cb.message.edit_text(
+            render_reset_stats_confirm(),
+            reply_markup=stats_reset_confirm_kb()
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "stats:reset_confirm")
+async def cb_stats_reset_confirm(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Confirm and execute stats reset"""
+    await state.clear()
+    
+    success = await repo.reset_stats(user_id=cb.from_user.id)
+    
+    if cb.message:
+        if success:
+            await cb.message.edit_text(
+                "✅ Tilastot nollattu\n\nTilastot ja lokit on poistettu. Tehtävät säilyvät.",
+                reply_markup=stats_menu_kb()
+            )
+        else:
+            await cb.message.edit_text(
+                "❌ Virhe: Tilastojen nollaus epäonnistui.",
+                reply_markup=stats_menu_kb()
+            )
+    await cb.answer("Tilastot nollattu" if success else "Virhe")
 
 
 @router.callback_query(F.data.startswith("stats:"))
 async def cb_stats_period(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Legacy stats period handler (for backward compatibility) - matches stats:7, stats:30, etc."""
+    # Skip if it's one of the new handlers
+    if cb.data in ("stats:all_time", "stats:ai", "stats:reset", "stats:reset_confirm"):
+        return
+    if cb.data.startswith("stats:ai:"):
+        return
+    
     await state.clear()
     parts = cb.data.split(":", 1)
     days_str = parts[1] if len(parts) > 1 else "7"

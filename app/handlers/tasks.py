@@ -1,5 +1,22 @@
 """
 Task action handlers (done, delete, edit, restore).
+
+ROUTER MAP:
+- task:done:<task_id> - Mark task as done
+- task:del:<task_id> - Delete task
+- task:deadline:<task_id> - Set deadline for task
+- task:schedule:<task_id> - Set schedule for task
+- edit:task:<task_id> - Open task edit menu
+- edit:del:<task_id> - Delete task from edit view
+- edit:back - Back to edit list
+- done:page:<offset> - Pagination for completed tasks
+- done:restore:<event_id> - Restore completed task
+- deleted:page:<offset> - Pagination for deleted tasks
+- deleted:restore:<event_id> - Restore deleted task
+- completed:restore:<event_id> - Legacy restore completed (use done:restore:)
+- p:<project_id> - Legacy project detail (use proj:detail:)
+- ps:<step_id> - Mark project step as done
+- ps:del:<step_id> - Delete project step
 """
 from __future__ import annotations
 
@@ -65,8 +82,22 @@ async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
             now = repo._now_iso()
             result = await repo.advance_project_step(step_id=step_id, now=now)
             
-            # Log result for debugging (ignore return value except for logging)
+            # Log result for debugging
             logging.info(f"Project step {step_id} advanced: {result.get('action', 'unknown')}")
+            
+            # If project was completed, show summary
+            if result.get('action') == 'completed_project':
+                project_id = result.get('project_id')
+                if project_id:
+                    # Get project and steps for summary
+                    project = await repo.get_project(project_id)
+                    if project:
+                        steps = await repo.get_project_steps(project_id)
+                        from app.ui import render_project_completion_summary
+                        summary = render_project_completion_summary(project, steps)
+                        
+                        # Show summary as callback answer (toast notification)
+                        await cb.answer(summary, show_alert=True)
             
             # Always refresh list (idempotent: even if noop, refresh to show current state)
             await return_to_main_menu(cb, repo, state=state, force_refresh=True)

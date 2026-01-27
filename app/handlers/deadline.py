@@ -1,5 +1,14 @@
 """
 Deadline flow handlers for setting deadlines on tasks.
+
+ROUTER MAP:
+- task:deadline:<task_id> - Start deadline flow for existing task
+- add:deadline:date:<offset> - Select deadline date (for new task)
+- add:deadline:time:<time> - Select deadline time (for new task)
+- deadline:date:<offset> - Select deadline date (for existing task)
+- deadline:time:<time> - Select deadline time (for existing task)
+- deadline:custom_time - Custom time input
+- deadline:back - Back in deadline flow
 """
 from __future__ import annotations
 
@@ -179,7 +188,7 @@ async def cb_add_deadline_date(cb: CallbackQuery, state: FSMContext, repo: Tasks
 @router.callback_query(F.data.startswith("add:deadline:time:"))
 async def cb_add_deadline_time(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Handle deadline time selection when adding task"""
-    from app.handlers.helpers import add_task_with_deadline
+    from app.handlers.common import Flow
     
     parts = parse_callback_data(cb.data, 4)
     time_option = parts[3] if parts else None
@@ -192,21 +201,31 @@ async def cb_add_deadline_time(cb: CallbackQuery, state: FSMContext, repo: Tasks
         return
     
     if time_option == "back":
-        await state.set_state(Flow.waiting_task_category)
+        # Go back to date selection
+        from app.ui import date_picker_kb
         if cb.message:
-            task_text = data.get(CtxKeys.add_task_text, '')
-            await cb.message.edit_text(f"Tehtävä: {task_text}\n\nValitse kategoria:", reply_markup=None)
+            await cb.message.edit_text(
+                "⏰ Määräaikainen tehtävä\n\nValitse päivämäärä:",
+                reply_markup=date_picker_kb("add:deadline:date")
+            )
         await cb.answer()
         return
     
     if time_option == "custom":
+        # Store that we're waiting for custom time input
         await state.set_state(Flow.waiting_task_deadline)
         if cb.message:
             await cb.message.answer("Kirjoita aika muodossa HHMM tai HH:MM (esim. 0930 tai 09:30):")
         await cb.answer()
         return
     
-    await add_task_with_deadline(cb, state, repo, data, date_offset, time_option)
+    # Store time and move to text input state
+    await state.update_data({CtxKeys.add_deadline_time: time_option})
+    await state.set_state(Flow.waiting_deadline_text)
+    
+    if cb.message:
+        await cb.message.answer("Kirjoita tehtävän teksti viestinä:")
+    await cb.answer()
 
 
 @router.message(Flow.waiting_task_deadline)
@@ -217,16 +236,30 @@ async def msg_add_deadline_custom_time(message: Message, state: FSMContext, repo
         await message.answer("Virheellinen aika. Käytä muotoa HHMM tai HH:MM (esim. 0930 tai 09:30).")
         return
     
-    data = await state.get_data()
-    date_offset = data.get(CtxKeys.add_deadline_date_offset)
+    # Store time and move to text input state
+    await state.update_data({CtxKeys.add_deadline_time: time_str})
+    await state.set_state(Flow.waiting_deadline_text)
     
-    if date_offset is None:
-        await return_to_main_menu(message, repo, state=state)
+    await message.answer("Kirjoita tehtävän teksti viestinä:")
+
+
+@router.message(Flow.waiting_deadline_text)
+async def msg_add_deadline_text(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle text input for deadline task (after date/time selection)"""
+    from app.handlers.common import return_to_main_menu
+    
+    task_text = (message.text or "").strip()
+    if not task_text:
+        await message.answer("Tyhjä tehtävä ei kelpaa. Kirjoita tehtävä viestinä.")
         return
     
-    task_text = data.get(CtxKeys.add_task_text)
-    if not task_text:
-        await message.answer("Virhe: tehtävän teksti puuttuu.")
+    data = await state.get_data()
+    date_offset = data.get(CtxKeys.add_deadline_date_offset)
+    time_str = data.get(CtxKeys.add_deadline_time)
+    
+    if date_offset is None or not time_str:
+        await message.answer("Virhe: päivämäärä tai aika puuttuu.")
+        await return_to_main_menu(message, repo, state=state)
         return
     
     date_dt = get_date_offset_days(date_offset)
@@ -235,9 +268,9 @@ async def msg_add_deadline_custom_time(message: Message, state: FSMContext, repo
     await repo.add_task(
         user_id=message.from_user.id,
         text=task_text,
-        task_type=data.get(CtxKeys.add_task_type, 'regular'),
-        difficulty=data.get(CtxKeys.add_task_difficulty, 5),
-        category=data.get(CtxKeys.add_task_category, ''),
+        task_type='deadline',
+        difficulty=5,
+        category='',
         deadline=deadline_iso
     )
-    await return_to_main_menu(message, repo, state=state)
+    await return_to_main_menu(message, repo, state=state, answer_text="Tehtävä lisätty", force_refresh=True)

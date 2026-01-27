@@ -3,23 +3,21 @@ Deterministic priority computation for tasks.
 
 Combines multiple factors:
 - Base priority (from '!' syntax)
-- Deadline proximity
-- Schedule window proximity
+- Deadline proximity (simplified step-based boost)
+- Schedule proximity (simplified step-based boost)
 
 All weights are configurable in one place.
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from app.db import Task
+from typing import Optional
 
 
-def _parse_iso_datetime(iso_str: str) -> Optional[datetime]:
+def _parse_iso_datetime(iso_str: Optional[str]) -> Optional[datetime]:
     """Parse ISO datetime string to UTC datetime. Returns None on error."""
+    if not iso_str:
+        return None
     try:
         dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -27,182 +25,116 @@ def _parse_iso_datetime(iso_str: str) -> Optional[datetime]:
         return None
 
 
-def _calculate_urgency_boost(hours_until: float, urgency_hours: float, base_boost: float, max_boost: float) -> float:
-    """Calculate urgency boost factor. Returns boost value."""
-    if hours_until <= 0:
-        return max_boost
-    if hours_until >= urgency_hours:
-        return base_boost
-    urgency_factor = 1.0 - (hours_until / urgency_hours)
-    return base_boost + urgency_factor * (max_boost - base_boost)
+def _hours_until(target: datetime, now: datetime) -> float:
+    """Calculate hours until target datetime. Negative if target is in the past."""
+    delta = target - now
+    return delta.total_seconds() / 3600.0
 
 
-# Configurable weights for priority computation
-PRIORITY_WEIGHTS = {
-    "base_priority": 1.0,  # Multiplier for base priority (0-5 from '!' syntax)
-    "deadline_base": 1.0,  # Base boost for having a deadline
-    "deadline_urgency_hours": 24.0,  # Hours before deadline when urgency kicks in
-    "deadline_overdue_boost": 50.0,  # Boost for overdue tasks
-    "schedule_base": 1.0,  # Base boost for having a schedule
-    "schedule_urgency_hours": 2.0,  # Hours before scheduled time when urgency kicks in
-    "schedule_passed_boost": 30.0,  # Boost for tasks with passed schedule window
-}
+# Step-based boost configuration
+# Each step defines: (hours_threshold, boost_value)
+# Boost increases as deadline/scheduled_time approaches
+DEADLINE_BOOST_STEPS = [
+    (72.0, 10),   # 72h+ until deadline: +10 boost
+    (24.0, 50),   # 24-72h: +50 boost
+    (6.0, 200),   # 6-24h: +200 boost
+    (1.0, 500),   # 1-6h: +500 boost
+    (0.25, 800),  # 15min-1h: +800 boost
+    (0.0, 1000),  # 0-15min: +1000 boost
+]
+
+DEADLINE_OVERDUE_BOOST = 1000  # Overdue deadline: always highest priority
+
+SCHEDULED_BOOST_STEPS = [
+    (72.0, 5),    # 72h+ until scheduled: +5 boost
+    (24.0, 20),   # 24-72h: +20 boost
+    (6.0, 100),   # 6-24h: +100 boost
+    (1.0, 300),   # 1-6h: +300 boost
+    (0.25, 500),  # 15min-1h: +500 boost
+    (0.0, 500),   # 0-15min: +500 boost (stays high after scheduled time)
+]
+
+SCHEDULED_PASSED_BOOST = 500  # After scheduled time: +500 boost
 
 
-def compute_deadline_priority(deadline_iso: Optional[str], now: datetime) -> float:
+def compute_time_boost(
+    now: datetime,
+    base_priority: int,
+    scheduled_time: Optional[str],
+    deadline_time: Optional[str]
+) -> int:
     """
-    Compute priority boost from deadline proximity.
+    Compute time-based priority boost using step-based logic.
     
-    Rules:
-    - Overdue tasks get maximum boost
-    - Priority increases as deadline approaches
-    - No deadline = 0 boost
+    Priority boost rules:
+    - Deadline overdue: MAX_BOOST (1000) - always highest priority
+    - Deadline approaching: step-based boost (10-1000) based on time until deadline
+    - Scheduled time passed: +500 boost
+    - Scheduled time approaching: step-based boost (5-500) based on time until scheduled
+    - No times: 0 boost
     
     Args:
-        deadline_iso: ISO datetime string in UTC, or None
         now: Current datetime in UTC
+        base_priority: Base priority from '!' syntax (0-5)
+        scheduled_time: ISO datetime string for scheduled time, or None
+        deadline_time: ISO datetime string for deadline time, or None
     
     Returns:
-        Priority boost value (higher = more urgent)
+        Integer boost value (higher = more urgent)
     """
-    if not deadline_iso:
-        return 0.0
+    boost = 0
     
-    deadline = _parse_iso_datetime(deadline_iso)
-    if not deadline:
-        return 0.0
+    # Deadline boost (highest priority)
+    if deadline_time:
+        deadline_dt = _parse_iso_datetime(deadline_time)
+        if deadline_dt:
+            hours_until = _hours_until(deadline_dt, now)
+            
+            # Overdue: maximum boost
+            if hours_until < 0:
+                return DEADLINE_OVERDUE_BOOST
+            
+            # Step-based boost as deadline approaches
+            for threshold, step_boost in DEADLINE_BOOST_STEPS:
+                if hours_until >= threshold:
+                    boost = max(boost, step_boost)
+                    break
     
-    # Overdue tasks get maximum boost
-    if deadline < now:
-        return PRIORITY_WEIGHTS["deadline_overdue_boost"]
-    
-    # Calculate time until deadline
-    time_until = deadline - now
-    hours_until = time_until.total_seconds() / 3600.0
-    
-    # Base boost for having a deadline
-    boost = PRIORITY_WEIGHTS["deadline_base"]
-    
-    # Urgency boost as deadline approaches
-    if hours_until <= PRIORITY_WEIGHTS["deadline_urgency_hours"]:
-        boost = _calculate_urgency_boost(
-            hours_until,
-            PRIORITY_WEIGHTS["deadline_urgency_hours"],
-            PRIORITY_WEIGHTS["deadline_base"],
-            PRIORITY_WEIGHTS["deadline_overdue_boost"]
-        )
+    # Scheduled boost (lower priority than deadline)
+    if scheduled_time:
+        scheduled_dt = _parse_iso_datetime(scheduled_time)
+        if scheduled_dt:
+            hours_until = _hours_until(scheduled_dt, now)
+            
+            # After scheduled time: fixed boost
+            if hours_until < 0:
+                boost = max(boost, SCHEDULED_PASSED_BOOST)
+            else:
+                # Step-based boost as scheduled time approaches
+                for threshold, step_boost in SCHEDULED_BOOST_STEPS:
+                    if hours_until >= threshold:
+                        boost = max(boost, step_boost)
+                        break
     
     return boost
 
 
-def compute_schedule_priority(
-    schedule_kind: Optional[str],
-    schedule_json: Optional[str],
-    now: datetime
-) -> float:
+def compute_priority(
+    base_priority: int,
+    scheduled_time: Optional[str],
+    deadline_time: Optional[str],
+    now: Optional[datetime] = None
+) -> int:
     """
-    Compute priority boost from schedule window proximity.
-    
-    Rules:
-    - If scheduled window has passed without completion, high priority
-    - Priority increases as scheduled time approaches
-    - No schedule = 0 boost
-    
-    Args:
-        schedule_kind: One of 'none', 'at_time', 'time_range', 'all_day', or None
-        schedule_json: JSON string with schedule details, or None
-        now: Current datetime in UTC
-    
-    Returns:
-        Priority boost value (higher = more urgent)
-    """
-    if not schedule_kind or schedule_kind == 'none':
-        return 0.0
-    
-    if not schedule_json:
-        return 0.0
-    
-    try:
-        schedule_data = json.loads(schedule_json)
-    except (json.JSONDecodeError, TypeError):
-        return 0.0
-    
-    boost = PRIORITY_WEIGHTS["schedule_base"]
-    
-    if schedule_kind == 'at_time':
-        # Single timestamp
-        timestamp_str = schedule_data.get('timestamp')
-        if timestamp_str:
-            scheduled_time = _parse_iso_datetime(timestamp_str)
-            if scheduled_time:
-                if scheduled_time < now:
-                    return PRIORITY_WEIGHTS["schedule_passed_boost"]
-                
-                hours_until = (scheduled_time - now).total_seconds() / 3600.0
-                if hours_until <= PRIORITY_WEIGHTS["schedule_urgency_hours"]:
-                    boost = _calculate_urgency_boost(
-                        hours_until,
-                        PRIORITY_WEIGHTS["schedule_urgency_hours"],
-                        PRIORITY_WEIGHTS["schedule_base"],
-                        PRIORITY_WEIGHTS["schedule_passed_boost"]
-                    )
-        return boost
-    
-    elif schedule_kind == 'time_range':
-        # Time range: check if window has passed or is approaching
-        start_str = schedule_data.get('start_time')
-        end_str = schedule_data.get('end_time')
-        
-        if start_str and end_str:
-            start_time = _parse_iso_datetime(start_str)
-            end_time = _parse_iso_datetime(end_str)
-            if start_time and end_time:
-                if end_time < now:
-                    return PRIORITY_WEIGHTS["schedule_passed_boost"]
-                
-                if start_time <= now <= end_time:
-                    return boost + (PRIORITY_WEIGHTS["schedule_passed_boost"] - PRIORITY_WEIGHTS["schedule_base"]) * 0.5
-                
-                hours_until = (start_time - now).total_seconds() / 3600.0
-                if 0 < hours_until <= PRIORITY_WEIGHTS["schedule_urgency_hours"]:
-                    boost = _calculate_urgency_boost(
-                        hours_until,
-                        PRIORITY_WEIGHTS["schedule_urgency_hours"],
-                        PRIORITY_WEIGHTS["schedule_base"],
-                        PRIORITY_WEIGHTS["schedule_passed_boost"]
-                    )
-    
-    elif schedule_kind == 'all_day':
-        # All day: check if date has passed
-        date_str = schedule_data.get('date')
-        if date_str:
-            try:
-                # Parse date (YYYY-MM-DD)
-                scheduled_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                today = now.date()
-                
-                # If date has passed, high priority
-                if scheduled_date < today:
-                    return PRIORITY_WEIGHTS["schedule_passed_boost"]
-                
-                # If today, medium priority
-                if scheduled_date == today:
-                    return boost + (PRIORITY_WEIGHTS["schedule_passed_boost"] - PRIORITY_WEIGHTS["schedule_base"]) * 0.3
-            except (ValueError, AttributeError):
-                pass
-    
-    return boost
-
-
-def compute_priority(task: "Task", now: Optional[datetime] = None) -> float:
-    """
-    Compute overall priority for a task combining all factors.
+    Compute overall priority for a task combining base priority and time boost.
     
     Formula:
-    computed_priority = (base_priority * weight) + deadline_boost + schedule_boost
+    priority_effective = base_priority + time_boost
     
     Args:
-        task: Task object with priority, deadline, schedule info
+        base_priority: Base priority from '!' syntax (0-5)
+        scheduled_time: ISO datetime string for scheduled time, or None
+        deadline_time: ISO datetime string for deadline time, or None
         now: Current datetime in UTC (defaults to now if not provided)
     
     Returns:
@@ -212,16 +144,7 @@ def compute_priority(task: "Task", now: Optional[datetime] = None) -> float:
     if now is None:
         now = datetime.now(timezone.utc)
     
-    # Base priority from '!' syntax (0-5)
-    base_priority = task.priority * PRIORITY_WEIGHTS["base_priority"]
-    
-    # Deadline boost
-    deadline_boost = compute_deadline_priority(task.deadline, now)
-    
-    # Schedule boost
-    schedule_boost = compute_schedule_priority(task.schedule_kind, task.schedule_json, now)
+    time_boost = compute_time_boost(now, base_priority, scheduled_time, deadline_time)
     
     # Combined priority
-    computed = base_priority + deadline_boost + schedule_boost
-    
-    return computed
+    return base_priority + time_boost
