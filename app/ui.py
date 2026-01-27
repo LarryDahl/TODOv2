@@ -251,7 +251,7 @@ def add_task_category_kb() -> InlineKeyboardMarkup:
 
 def render_progress_bar(progress_percent: int) -> str:
     """Render progress bar: 10 parts, fills 10% at a time"""
-    filled = progress_percent // 10
+    filled = min(progress_percent // 10, 10)
     empty = 10 - filled
     return "█" * filled + "░" * empty + f" {progress_percent}%"
 
@@ -260,6 +260,138 @@ def render_default_header(daily_progress: int) -> str:
     """Render default view header with progress bar"""
     progress_bar = render_progress_bar(daily_progress)
     return f"{progress_bar}\n\nTehtävälista\n\nKlikkaa tehtävää merkataksesi sen suoritetuksi.\nKlikkaa tehtyä tehtävää palauttaaksesi sen listalle."
+
+
+def render_home_text(
+    completed_count: int,
+    active_count: int,
+    active_steps: list[dict],
+    force_refresh: bool = False
+) -> str:
+    """
+    Render home view text with progress bar and instructions.
+    
+    Args:
+        completed_count: Number of completed tasks
+        active_count: Number of active tasks
+        active_steps: List of active project steps (each has total_steps, order_index)
+        force_refresh: Whether to add invisible character for force refresh
+    
+    Returns:
+        Formatted text with progress bar and instructions
+    """
+    # Calculate project steps remaining
+    project_steps_remaining = 0
+    for step in active_steps:
+        total_steps = step.get('total_steps', 0)
+        order_index = step.get('order_index', 0)
+        # Remaining = total - completed (order_index is 1-based, so completed = order_index - 1)
+        # But we count active + pending, so: total - (order_index - 1) = total - order_index + 1
+        # Actually, if order_index=2 and total=5, we have: completed=1, active=1, pending=3
+        # So remaining = total - (order_index - 1) = 5 - 1 = 4 (active + pending)
+        remaining = total_steps - (order_index - 1)
+        project_steps_remaining += remaining
+    
+    # Calculate progress: done/(done+active+project_steps_remaining)
+    total_items = completed_count + active_count + project_steps_remaining
+    if total_items == 0:
+        progress_percent = 100
+    else:
+        progress_percent = int((completed_count / total_items) * 100)
+    
+    # Build progress bar
+    progress_bar = render_progress_bar(progress_percent)
+    
+    # Build instructions (2-3 lines max)
+    instructions = (
+        "Klikkaa tehtävää = merkitse tehdyksi\n"
+        "+ = lisää tehtävä\n"
+        "refresh = päivitä lista"
+    )
+    
+    # Combine
+    text = f"{progress_bar}\n\n{instructions}"
+    
+    # Add invisible character for force refresh if needed
+    if force_refresh:
+        text += "\u200b"  # Zero-width space
+    
+    return text
+
+
+def build_home_keyboard(
+    completed_tasks: list[dict],
+    active_tasks: list[Task],
+    active_steps: list[dict]
+) -> InlineKeyboardMarkup:
+    """
+    Build home view keyboard with new order:
+    1) Completed tasks (newest first): 3 items
+    2) Project steps: active step per project
+    3) Active tasks: priority order (!!!!, !!!, !!, !, n)
+    4) Bottom row: [+][stats][settings][refresh]
+    
+    Args:
+        completed_tasks: List of completed task dicts (with 'id', 'text')
+        active_tasks: List of Task objects (already sorted by priority)
+        active_steps: List of active project step dicts
+    
+    Returns:
+        InlineKeyboardMarkup
+    """
+    kb = InlineKeyboardBuilder()
+    
+    # 1) Completed tasks (newest first): reverse order so newest is first
+    for comp_task in reversed(completed_tasks[:3]):
+        task_text = _label(comp_task.get('text', ''), 47)
+        kb.row(
+            InlineKeyboardButton(
+                text=f"✓ {task_text}",
+                callback_data=f"completed:restore:{comp_task.get('id')}",
+            )
+        )
+    
+    # 2) Project steps: active step per project
+    # Format: "Projekti 1 · step 1" or similar
+    for step in active_steps:
+        project_title = step.get('project_title', 'Projekti')
+        step_text = step.get('text', '')
+        order_index = step.get('order_index', 0)
+        step_id = step.get('id', 0)
+        
+        # Format: "Projekti 1 · step 1" (shortened)
+        display_text = f"{project_title} · {step_text}"
+        display_text = _label(display_text, 48)
+        
+        kb.row(
+            InlineKeyboardButton(
+                text=display_text,
+                callback_data=f"ps:{step_id}",
+            )
+        )
+    
+    # 3) Active tasks: priority order (already sorted by priority in repo.list_tasks)
+    # Render with priority indicators
+    for task in active_tasks:
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        task_text = _label(rendered_title, 48)
+        kb.row(
+            InlineKeyboardButton(
+                text=task_text,
+                callback_data=f"t:{task.id}",
+            )
+        )
+    
+    # 4) Bottom row: [+][stats][settings][refresh]
+    kb.row(
+        InlineKeyboardButton(text="+", callback_data="view:add"),
+        InlineKeyboardButton(text="stats", callback_data="view:stats"),
+        InlineKeyboardButton(text="settings", callback_data="view:settings"),
+        InlineKeyboardButton(text="refresh", callback_data="view:refresh"),
+        width=4,
+    )
+    
+    return kb.as_markup()
 
 
 def render_settings_header() -> str:
