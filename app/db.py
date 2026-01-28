@@ -1251,7 +1251,7 @@ class TasksRepo:
             cur = await db.execute(
                 """
                 UPDATE tasks
-                SET deadline = NULL, updated_at = ?
+                SET deadline = NULL, deadline_time = NULL, updated_at = ?
                 WHERE id = ? AND user_id = ?;
                 """,
                 (now, task_id, user_id),
@@ -1342,7 +1342,7 @@ class TasksRepo:
             cur = await db.execute(
                 """
                 UPDATE tasks
-                SET schedule_kind = NULL, schedule_json = NULL, updated_at = ?
+                SET schedule_kind = NULL, schedule_json = NULL, scheduled_time_new = NULL, updated_at = ?
                 WHERE id = ? AND user_id = ?;
                 """,
                 (now, task_id, user_id),

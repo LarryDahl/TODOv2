@@ -53,14 +53,14 @@ async def cb_restore_completed(cb: CallbackQuery, state: FSMContext, repo: Tasks
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:done:") | F.data.startswith("t:") | F.data.startswith("ps:"))
+@router.callback_query(F.data.startswith("task:done:") | F.data.startswith("t:") | (F.data.startswith("ps:") & ~F.data.startswith("ps:del:")))
 async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """
     Unified handler for marking tasks and project steps as done.
     Supports:
     - task:done:<task_id> (existing format)
     - t:<task_id> (new format)
-    - ps:<step_id> (project step format)
+    - ps:<step_id> (project step format, but NOT ps:del: which is handled separately)
     """
     import logging
     from app.handlers.common import return_to_main_menu
@@ -68,7 +68,8 @@ async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
     callback_data = cb.data
     
     # Branch based on callback prefix
-    if callback_data.startswith("ps:"):
+    # Note: ps:del: is excluded by filter, so this only handles ps:<step_id>
+    if callback_data.startswith("ps:") and not callback_data.startswith("ps:del:"):
         # Handle project step
         parts = parse_callback_data(callback_data, 2)
         step_id = parse_int_safe(parts[1]) if parts else None
