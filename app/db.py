@@ -237,8 +237,9 @@ class TasksRepo:
                 # Tertiary: creation time (older first = ascending)
                 created_at = task.created_at
                 
-                # Return tuple for sorting: negative for descending, positive for ascending
-                return (-effective_priority, created_at)
+                # Return tuple for sorting: positive for ascending (lowest priority first, highest last)
+                # This means highest priority tasks appear at the bottom of the list
+                return (effective_priority, created_at)
             
             tasks.sort(key=sort_key)
             return tasks[:limit]

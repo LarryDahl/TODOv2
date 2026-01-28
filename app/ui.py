@@ -370,15 +370,15 @@ def build_home_keyboard(
     active_steps: list[dict]
 ) -> InlineKeyboardMarkup:
     """
-    Build home view keyboard with new order:
-    1) Completed tasks (newest first): 3 items
-    2) Project steps: active step per project
-    3) Active tasks: priority order (!!!!, !!!, !!, !, n)
+    Build home view keyboard with reversed order (most important at bottom):
+    1) Completed tasks (oldest first): 3 items
+    2) Active tasks: priority order (lowest priority first, highest last)
+    3) Project steps: active step per project
     4) Bottom row: [+][stats][settings][refresh]
     
     Args:
         completed_tasks: List of completed task dicts (with 'id', 'text')
-        active_tasks: List of Task objects (already sorted by priority)
+        active_tasks: List of Task objects (sorted: lowest priority first, highest last)
         active_steps: List of active project step dicts
     
     Returns:
@@ -386,8 +386,8 @@ def build_home_keyboard(
     """
     kb = InlineKeyboardBuilder()
     
-    # 1) Completed tasks (newest first): reverse order so newest is first
-    for comp_task in reversed(completed_tasks[:3]):
+    # 1) Completed tasks (oldest first, so newest appears at bottom)
+    for comp_task in completed_tasks[:3]:
         task_text = _label(comp_task.get('text', ''), 47)
         kb.row(
             InlineKeyboardButton(
@@ -396,7 +396,19 @@ def build_home_keyboard(
             )
         )
     
-    # 2) Project steps: active step per project
+    # 2) Active tasks: priority order (lowest priority first, highest priority last)
+    # Tasks are already sorted with lowest priority first, so render in order
+    for task in active_tasks:
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        task_text = _label(rendered_title, 48)
+        kb.row(
+            InlineKeyboardButton(
+                text=task_text,
+                callback_data=f"t:{task.id}",
+            )
+        )
+    
+    # 3) Project steps: active step per project (appears after tasks, before UI buttons)
     # Format: "Projekti 1 · step 1" (project title and step number)
     for step in active_steps:
         project_title = step.get('project_title', 'Projekti')
@@ -414,19 +426,7 @@ def build_home_keyboard(
             )
         )
     
-    # 3) Active tasks: priority order (already sorted by priority in repo.list_tasks)
-    # Render with priority indicators
-    for task in active_tasks:
-        rendered_title = render_title_with_priority(task.text, task.priority)
-        task_text = _label(rendered_title, 48)
-        kb.row(
-            InlineKeyboardButton(
-                text=task_text,
-                callback_data=f"t:{task.id}",
-            )
-        )
-    
-    # 4) Bottom row: [+][stats][settings][refresh]
+    # 4) Bottom row: [+][stats][settings][refresh] (always at the very bottom)
     kb.row(
         InlineKeyboardButton(text="+", callback_data="home:plus"),
         InlineKeyboardButton(text="stats", callback_data="view:stats"),  # Legacy, kept for compatibility
