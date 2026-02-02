@@ -34,6 +34,8 @@ class Flow(StatesGroup):
     waiting_task_category = State()
     waiting_task_deadline = State()
     waiting_task_scheduled = State()
+    # Project step edit states
+    waiting_project_step_text = State()  # For adding new project step
     # Deadline flow states
     waiting_deadline_date = State()
     waiting_deadline_time = State()
@@ -50,6 +52,7 @@ class Flow(StatesGroup):
     # Backlog project flow states
     waiting_project_name = State()
     waiting_project_steps = State()
+    waiting_project_rewrite_steps = State()  # For rewriting all project steps
     # Simplified add task flow states (from plus menu)
     waiting_deadline_text = State()  # After date/time selection, ask for text
     waiting_scheduled_text = State()  # After date/time selection, ask for text
@@ -121,13 +124,13 @@ async def render_home_message(
     active = await repo.list_tasks(user_id=user_id, limit=50)  # Get more for proper sorting
     active_steps = await repo.get_active_project_steps()
     
-    # Count completed and active tasks for progress calculation
-    completed_count = len(completed)
+    # Count completed tasks today (for progress bar) - all tasks, not just visible ones
+    completed_count_today = await repo.count_completed_tasks_today(user_id=user_id)
     active_count = len(active)
     
     # Build header text with progress bar
     header_text = render_home_text(
-        completed_count=completed_count,
+        completed_count=completed_count_today,
         active_count=active_count,
         active_steps=active_steps,
         force_refresh=force_refresh

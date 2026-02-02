@@ -44,6 +44,8 @@ FSM_INPUT_STATES = {
     Flow.waiting_delete_reason,
     Flow.waiting_project_name,
     Flow.waiting_project_steps,
+    Flow.waiting_project_step_text,
+    Flow.waiting_project_rewrite_steps,
 }
 
 

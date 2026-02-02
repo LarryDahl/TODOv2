@@ -292,8 +292,13 @@ def add_task_category_kb() -> InlineKeyboardMarkup:
 
 
 def render_progress_bar(progress_percent: int) -> str:
-    """Render progress bar: 10 parts, fills 10% at a time"""
-    filled = min(progress_percent // 10, 10)
+    """
+    Render progress bar: 10 parts, fills 10% at a time.
+    Progress percent can be > 100%, but bar is capped at 100%.
+    """
+    # Bar is always max 100%, but show actual percentage in text
+    bar_percent = min(progress_percent, 100)
+    filled = min(bar_percent // 10, 10)
     empty = 10 - filled
     return "█" * filled + "░" * empty + f" {progress_percent}%"
 
@@ -322,27 +327,9 @@ def render_home_text(
     Returns:
         Formatted text with progress bar and instructions
     """
-    # Calculate project steps remaining
-    # For each active step: remaining = total_steps - (order_index - 1)
-    # order_index is 1-based, so completed = order_index - 1
-    # remaining includes active (1) + pending (total_steps - order_index)
-    project_steps_remaining = 0
-    for step in active_steps:
-        total_steps = step.get('total_steps', 0)
-        order_index = step.get('order_index', 0)
-        # Remaining = active (1) + pending (total_steps - order_index)
-        # = 1 + (total_steps - order_index) = total_steps - order_index + 1
-        # Or simpler: total_steps - completed, where completed = order_index - 1
-        completed_steps = order_index - 1
-        remaining = total_steps - completed_steps
-        project_steps_remaining += remaining
-    
-    # Calculate progress: done/(done+active+project_steps_remaining)
-    total_items = completed_count + active_count + project_steps_remaining
-    if total_items == 0:
-        progress_percent = 100
-    else:
-        progress_percent = int((completed_count / total_items) * 100)
+    # Calculate progress: 1 completed task = 10%
+    # Progress can exceed 100%, but bar is capped at 100%
+    progress_percent = completed_count * 10
     
     # Build progress bar
     progress_bar = render_progress_bar(progress_percent)
@@ -408,23 +395,8 @@ def build_home_keyboard(
             )
         )
     
-    # 3) Project steps: active step per project (appears after tasks, before UI buttons)
-    # Format: "Projekti 1 · step 1" (project title and step number)
-    for step in active_steps:
-        project_title = step.get('project_title', 'Projekti')
-        order_index = step.get('order_index', 0)
-        step_id = step.get('id', 0)
-        
-        # Format: "Projekti 1 · step 1" (project title and step number)
-        display_text = f"{project_title} · step {order_index}"
-        display_text = _label(display_text, 48)
-        
-        kb.row(
-            InlineKeyboardButton(
-                text=display_text,
-                callback_data=f"ps:{step_id}",
-            )
-        )
+    # 3) Projects menu (projektit oman valikon taakse)
+    kb.row(InlineKeyboardButton(text="📋 Projektit", callback_data="view:projects"))
     
     # 4) Bottom row: [+][stats][settings][refresh] (always at the very bottom)
     kb.row(
@@ -737,10 +709,66 @@ def render_suggestions_header(count: int) -> str:
     return f"💡 Ehdotukset\n\n{count} ehdotusta {UI_PROJECT_PLURAL.lower()}sta.\n\nValitse 'Lisää tehtävälistaan' lisätäksesi tehtävän takaisin listalle."
 
 
-def project_detail_kb() -> InlineKeyboardMarkup:
-    """Project detail view keyboard with back button"""
+def render_projects_list_header() -> str:
+    """Header for projects list (päänäkymä > projektit)"""
+    return "📋 Projektit\n\nValitse projekti nähdäksesi askeleet ja merkitä ne tehdyiksi."
+
+
+def projects_list_kb(projects: list[dict]) -> InlineKeyboardMarkup:
+    """Projects list: project buttons + Takaisin + Asetukset (edit:projects)"""
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="⬅️ Takaisin listaan", callback_data="home:home"))
+    for project in projects:
+        title = project.get("title", "Untitled")
+        status = project.get("status", "active")
+        if status == "completed":
+            status_icon = "✅"
+        elif status == "cancelled":
+            status_icon = "❌"
+        else:
+            status_icon = "📋"
+        project_text = f"{status_icon} {_label(title, 45)}"
+        project_id = project.get("id", 0)
+        kb.row(
+            InlineKeyboardButton(
+                text=project_text,
+                callback_data=f"view:project:{project_id}",
+            )
+        )
+    kb.row(
+        InlineKeyboardButton(text="⚙️ Asetukset", callback_data="edit:projects"),
+        InlineKeyboardButton(text="⬅️ Takaisin", callback_data="home:home"),
+        width=2,
+    )
+    return kb.as_markup()
+
+
+def project_detail_view_kb(project: dict, steps: list[dict]) -> InlineKeyboardMarkup:
+    """Project detail view: each step as button (toggle done), back to project list"""
+    kb = InlineKeyboardBuilder()
+    for step in steps:
+        step_id = step.get("id", 0)
+        order_index = step.get("order_index", 0)
+        step_text = step.get("text", "")
+        status = step.get("status", "pending")
+        if status == "completed":
+            status_icon = "✅"
+        else:
+            status_icon = "☐"
+        step_display = f"{status_icon} {order_index}. {_label(step_text, 40)}"
+        kb.row(
+            InlineKeyboardButton(
+                text=step_display,
+                callback_data=f"proj:step:toggle:{step_id}",
+            )
+        )
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:projects"))
+    return kb.as_markup()
+
+
+def project_detail_kb() -> InlineKeyboardMarkup:
+    """Project detail view keyboard with back button (legacy)"""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin listaan", callback_data="view:projects"))
     return kb.as_markup()
 
 
@@ -853,3 +881,135 @@ def render_project_completion_summary(project: dict, steps: list[dict]) -> str:
             pass
     
     return "\n".join(lines)
+
+
+def render_projects_edit_header() -> str:
+    return "Muokkaa projekteja\n\nValitse projekti muokataksesi sen askelmia."
+
+
+def projects_edit_kb(projects: list[dict]) -> InlineKeyboardMarkup:
+    """Edit view: list of projects (click project to edit steps)"""
+    kb = InlineKeyboardBuilder()
+    
+    for project in projects:
+        title = project.get('title', 'Untitled')
+        status = project.get('status', 'active')
+        
+        # Format status indicator
+        if status == 'completed':
+            status_icon = "✅"
+        elif status == 'cancelled':
+            status_icon = "❌"
+        else:
+            status_icon = "📋"
+        
+        project_text = f"{status_icon} {_label(title, 45)}"
+        project_id = project.get('id', 0)
+        
+        kb.row(
+            InlineKeyboardButton(
+                text=project_text,
+                callback_data=f"edit:project:{project_id}",
+            )
+        )
+    
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="view:projects"))
+    return kb.as_markup()
+
+
+def project_steps_edit_kb(project: dict, steps: list[dict]) -> InlineKeyboardMarkup:
+    """Edit view: list of project steps with edit/delete/reorder options"""
+    kb = InlineKeyboardBuilder()
+    
+    project_id = project.get('id', 0)
+    
+    # List all steps
+    for step in steps:
+        step_id = step.get('id', 0)
+        order_index = step.get('order_index', 0)
+        step_text = step.get('text', '')
+        status = step.get('status', 'pending')
+        
+        # Format status indicator
+        if status == 'completed':
+            status_icon = "✅"
+        elif status == 'active':
+            status_icon = "▶️"
+        else:
+            status_icon = "⏸️"
+        
+        # Step display: [status] order. text
+        step_display = f"{status_icon} {order_index}. {_label(step_text, 40)}"
+        
+        kb.row(
+            InlineKeyboardButton(
+                text=step_display,
+                callback_data=f"edit:step:menu:{step_id}",
+            )
+        )
+    
+    # Add step button
+    kb.row(InlineKeyboardButton(text="➕ Lisää askel", callback_data=f"edit:step:add:{project_id}"))
+    
+    # Reorder button
+    kb.row(InlineKeyboardButton(text="🔄 Järjestä uudelleen", callback_data=f"edit:step:reorder:{project_id}"))
+    
+    # Rewrite project button
+    kb.row(InlineKeyboardButton(text="✏️ Uudelleenkirjoita projekti", callback_data=f"edit:project:rewrite:{project_id}"))
+    
+    # Delete project
+    kb.row(InlineKeyboardButton(text="🗑 Poista projekti", callback_data=f"edit:project:delete:{project_id}"))
+    
+    # Back button
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="edit:projects"))
+    
+    return kb.as_markup()
+
+
+def render_project_steps_edit_header(project: dict, steps: list[dict]) -> str:
+    """Render header for project steps edit view"""
+    project_title = project.get('title', 'Unknown Project')
+    total_steps = len(steps)
+    completed_count = sum(1 for s in steps if s.get('status') == 'completed')
+    
+    lines = [f"📋 {project_title}", ""]
+    lines.append(f"Askeleita: {completed_count}/{total_steps} valmiina")
+    lines.append("")
+    lines.append("Klikkaa askelta muokataksesi sitä.")
+    
+    return "\n".join(lines)
+
+
+def step_edit_menu_kb(step: dict, project_id: int) -> InlineKeyboardMarkup:
+    """Edit menu for a single step"""
+    kb = InlineKeyboardBuilder()
+    
+    step_id = step.get('id', 0)
+    status = step.get('status', 'pending')
+    
+    # Edit text
+    kb.row(InlineKeyboardButton(text="✏️ Muuta tekstiä", callback_data=f"edit:step:text:{step_id}"))
+    
+    # Status actions
+    if status == 'pending':
+        kb.row(InlineKeyboardButton(text="▶️ Aktivoi", callback_data=f"edit:step:activate:{step_id}"))
+    elif status == 'active':
+        kb.row(InlineKeyboardButton(text="✅ Merkitse tehdyksi", callback_data=f"edit:step:complete:{step_id}"))
+        kb.row(InlineKeyboardButton(text="⏸️ Palauta odottamaan", callback_data=f"edit:step:deactivate:{step_id}"))
+    elif status == 'completed':
+        kb.row(InlineKeyboardButton(text="⏸️ Palauta odottamaan", callback_data=f"edit:step:deactivate:{step_id}"))
+    
+    # Move up/down
+    kb.row(
+        InlineKeyboardButton(text="⬆️ Siirrä ylös", callback_data=f"edit:step:move_up:{step_id}"),
+        InlineKeyboardButton(text="⬇️ Siirrä alas", callback_data=f"edit:step:move_down:{step_id}"),
+        width=2,
+    )
+    
+    # Delete
+    kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"edit:step:delete:{step_id}"))
+    
+    # Back to steps list
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data=f"edit:project:{project_id}"))
+    
+    return kb.as_markup()
