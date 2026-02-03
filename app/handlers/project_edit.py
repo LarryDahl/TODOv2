@@ -79,28 +79,49 @@ async def cb_project_rewrite(cb: CallbackQuery, state: FSMContext, repo: TasksRe
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("edit:project:"))
-async def cb_edit_project_steps(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    """Show project steps edit view"""
+@router.callback_query(F.data.startswith("edit:project:delete:"))
+async def cb_edit_project_delete(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Delete project and all its steps; return to edit projects list or project list"""
     await state.clear()
-    
-    parts = parse_callback_data(cb.data, 3)
-    project_id = parse_int_safe(parts[2]) if parts else None
-    
+    parts = parse_callback_data(cb.data, 4)
+    project_id = parse_int_safe(parts[3]) if parts and len(parts) >= 4 else None
     if project_id is None:
         await cb.answer("Virheellinen projektin-id.", show_alert=True)
-        await return_to_main_menu(cb, repo, state=state)
         return
-    
+    success = await repo.delete_project(project_id)
+    if not success:
+        await cb.answer("Projektia ei löytynyt.", show_alert=True)
+        return
+    projects = await repo.list_all_projects()
+    from app.ui import render_projects_edit_header, projects_edit_kb
+    if cb.message:
+        await cb.message.edit_text(
+            render_projects_edit_header(),
+            reply_markup=projects_edit_kb(projects),
+        )
+    await cb.answer("Projekti poistettu")
+
+
+@router.callback_query(F.data.startswith("edit:project:"))
+async def cb_edit_project_steps(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Show project steps edit view (edit:project:<id>; delete/rewrite have own handlers)"""
+    await state.clear()
+
+    parts = parse_callback_data(cb.data, 3)
+    project_id = parse_int_safe(parts[2]) if parts else None
+
+    if project_id is None:
+        await cb.answer("Virheellinen projektin-id.", show_alert=True)
+        return
+
     # Get project and steps
     project = await repo.get_project(project_id)
     if not project:
         await cb.answer("Projektia ei löytynyt.", show_alert=True)
-        await return_to_main_menu(cb, repo, state=state)
         return
-    
+
     steps = await repo.get_project_steps(project_id)
-    
+
     if cb.message:
         await cb.message.edit_text(
             render_project_steps_edit_header(project, steps),

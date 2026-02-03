@@ -13,10 +13,18 @@ from app.constants import (
     ACTION_TASK_EDITED,
     TASK_ACTION_COMPLETED,
     TASK_ACTION_DELETED,
+    PROGRESS_SOURCE_TASK_COMPLETED,
 )
 from app.priority import parse_priority
 # Note: compute_deadline_priority and compute_schedule_priority were replaced by compute_priority
 # Import is done inline where needed to avoid circular imports
+
+
+# Task status for pool/queued/active/done model (PROMPT 1)
+TASK_STATUS_BACKLOG = "backlog"
+TASK_STATUS_ACTIVE = "active"
+TASK_STATUS_DROPPED = "dropped"
+# "done" = row removed from tasks, logged in task_events
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,9 @@ class Task:
     schedule_json: Optional[str]  # JSON string with schedule details
     deadline_time: Optional[str]  # ISO datetime for deadline (simplified, for priority computation), UTC
     scheduled_time_new: Optional[str]  # ISO datetime for scheduled time (simplified, for priority computation), UTC
+    status: str  # 'backlog' | 'active' | 'dropped'
+    cooldown_until: Optional[str]  # ISO datetime; used by Defer
+    tags: str  # JSON array string e.g. '["work","urgent"]', default '[]'
     created_at: str
     updated_at: str
 
@@ -48,10 +59,6 @@ class TasksRepo:
 
     async def init(self) -> None:
         async with aiosqlite.connect(self._db_path) as db:
-            # Check if new columns exist, if not add them
-            cursor = await db.execute("PRAGMA table_info(tasks)")
-            columns = [row[1] for row in await cursor.fetchall()]
-            
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -74,6 +81,9 @@ class TasksRepo:
                 );
                 """
             )
+            # Check existing columns after CREATE (for migration)
+            cursor = await db.execute("PRAGMA table_info(tasks)")
+            columns = [row[1] for row in await cursor.fetchall()]
             
             # Add new columns if they don't exist (migration)
             if 'task_type' not in columns:
@@ -99,8 +109,17 @@ class TasksRepo:
                 await db.execute("ALTER TABLE tasks ADD COLUMN deadline_time TEXT;")
             if 'scheduled_time_new' not in columns:
                 await db.execute("ALTER TABLE tasks ADD COLUMN scheduled_time_new TEXT;")
+            # PROMPT 1: pool/queued/active/done
+            if 'status' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'backlog';")
+            if 'cooldown_until' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN cooldown_until TEXT;")
+            # PROMPT 2: tags (JSON array string)
+            if 'tags' not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';")
             
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status);")
 
             await db.execute(
                 """
@@ -156,7 +175,67 @@ class TasksRepo:
                 );
                 """
             )
+            # PROMPT 1: store active card message_id for edit/delete
+            us_cursor = await db.execute("PRAGMA table_info(user_settings)")
+            us_columns = [row[1] for row in await us_cursor.fetchall()]
+            if 'active_card_message_id' not in us_columns:
+                await db.execute("ALTER TABLE user_settings ADD COLUMN active_card_message_id INTEGER;")
+            # PROMPT 2: time windows (preferred day start/end, e.g. "09:00", "17:00")
+            if 'day_start_time' not in us_columns:
+                await db.execute("ALTER TABLE user_settings ADD COLUMN day_start_time TEXT;")
+            if 'day_end_time' not in us_columns:
+                await db.execute("ALTER TABLE user_settings ADD COLUMN day_end_time TEXT;")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_action_log_action ON action_log(action);")
+            
+            # PROMPT 1: 7 suggestion slots per user (0..6); total display rows = 7 (active + suggestions)
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_suggestion_slots (
+                    user_id INTEGER NOT NULL,
+                    slot_index INTEGER NOT NULL,
+                    task_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, slot_index),
+                    CHECK (slot_index >= 0 AND slot_index <= 6)
+                );
+                """
+            )
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_user_suggestion_slots_user ON user_suggestion_slots(user_id);")
+            # Migration: expand from 6 to 7 slots if table had old CHECK (slot_index <= 5)
+            cur = await db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='user_suggestion_slots';"
+            )
+            row = await cur.fetchone()
+            if row and row[0] and "slot_index <= 5" in row[0]:
+                await db.execute("DROP TABLE user_suggestion_slots;")
+                await db.execute(
+                    """
+                    CREATE TABLE user_suggestion_slots (
+                        user_id INTEGER NOT NULL,
+                        slot_index INTEGER NOT NULL,
+                        task_id INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (user_id, slot_index),
+                        CHECK (slot_index >= 0 AND slot_index <= 6)
+                    );
+                    """
+                )
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_user_suggestion_slots_user ON user_suggestion_slots(user_id);")
+            
+            # PROMPT 2: progress/XP hook table (task_completed etc.)
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS progress_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    task_id INTEGER,
+                    amount REAL NOT NULL DEFAULT 1,
+                    at TEXT NOT NULL
+                );
+                """
+            )
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_progress_log_user_at ON progress_log(user_id, at);")
             
             # Projects table for backlog projects with ordered steps
             await db.execute(
@@ -208,7 +287,7 @@ class TasksRepo:
             # Fetch all tasks to ensure consistent sorting across different views
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ?;
                 """,
@@ -367,10 +446,10 @@ class TasksRepo:
         async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', None, None, deadline_time, scheduled_time_new, now, now),
+                (user_id, clean_title, task_type, difficulty, category, deadline, scheduled_time, priority, 'bang_suffix', None, None, deadline_time, scheduled_time_new, TASK_STATUS_BACKLOG, None, '[]', now, now),
             )
             await db.commit()
             task_id = int(cur.lastrowid)
@@ -390,7 +469,7 @@ class TasksRepo:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, created_at, updated_at
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ? AND id = ?;
                 """,
@@ -398,6 +477,179 @@ class TasksRepo:
             )
             row = await cur.fetchone()
             return Task(**dict(row)) if row else None
+
+    # ---------- PROMPT 1: pool/queued/active/done ----------
+
+    async def get_active_task(self, user_id: int) -> Optional[Task]:
+        """Single active task (for backward compat). Prefer get_active_tasks."""
+        tasks = await self.get_active_tasks(user_id, limit=1)
+        return tasks[0] if tasks else None
+
+    async def get_active_tasks(self, user_id: int, limit: int = 7) -> list[Task]:
+        """Up to limit tasks with status=active, most recently updated first."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at
+                FROM tasks
+                WHERE user_id = ? AND status = ?
+                ORDER BY updated_at DESC
+                LIMIT ?;
+                """,
+                (user_id, TASK_STATUS_ACTIVE, limit),
+            )
+            rows = await cur.fetchall()
+            return [Task(**dict(r)) for r in rows]
+
+    async def set_task_active(self, user_id: int, task_id: int) -> bool:
+        """Set one task active (allow multiple active; display max 7). Returns True if ok."""
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE user_id = ? AND id = ?;",
+                (TASK_STATUS_ACTIVE, now, user_id, task_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def get_suggestion_slots(self, user_id: int) -> list[Optional[int]]:
+        """Return 7 task_ids (or None for empty slot). Order: slot 0..6."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT slot_index, task_id FROM user_suggestion_slots WHERE user_id = ? ORDER BY slot_index;",
+                (user_id,),
+            )
+            rows = await cur.fetchall()
+        slot_map = {r["slot_index"]: r["task_id"] for r in rows}
+        return [slot_map.get(i) for i in range(7)]
+
+    async def set_suggestion_slot(self, user_id: int, slot_index: int, task_id: Optional[int], now: str) -> None:
+        """Set one slot. task_id=None to clear."""
+        async with aiosqlite.connect(self._db_path) as db:
+            if task_id is None:
+                await db.execute(
+                    "DELETE FROM user_suggestion_slots WHERE user_id = ? AND slot_index = ?;",
+                    (user_id, slot_index),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO user_suggestion_slots (user_id, slot_index, task_id, updated_at)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    (user_id, slot_index, task_id, now),
+                )
+            await db.commit()
+
+    async def remove_task_from_slots(self, user_id: int, task_id: int, now: str) -> int:
+        """Remove task_id from any slot; fill that slot from backlog. Returns slot_index that was freed (-1 if not in slots)."""
+        slots = await self.get_suggestion_slots(user_id)
+        idx = next((i for i, tid in enumerate(slots) if tid == task_id), -1)
+        if idx < 0:
+            return -1
+        await self.set_suggestion_slot(user_id, idx, None, now)
+        await self._fill_one_slot(user_id, idx, now)
+        return idx
+
+    async def _fill_one_slot(self, user_id: int, slot_index: int, now: str) -> Optional[int]:
+        """Fill one slot from backlog (exclude already in slots and all active). Returns task_id put in slot or None."""
+        slots = await self.get_suggestion_slots(user_id)
+        in_slots = {tid for tid in slots if tid is not None}
+        active_tasks = await self.get_active_tasks(user_id, limit=7)
+        exclude_ids = in_slots | {t.id for t in active_tasks}
+        candidates = await self.get_backlog_tasks_for_fill(user_id, exclude_ids=exclude_ids, limit=1)
+        if not candidates:
+            return None
+        task_id = candidates[0].id
+        await self.set_suggestion_slot(user_id, slot_index, task_id, now)
+        return task_id
+
+    async def get_backlog_tasks_for_fill(self, user_id: int, exclude_ids: Optional[set[int]] = None, limit: int = 6) -> list[Task]:
+        """Backlog tasks (status=backlog, cooldown_until null or past), not in exclude_ids. Sorted: priority desc, created_at asc."""
+        exclude_ids = exclude_ids or set()
+        now_iso = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id, user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at
+                FROM tasks
+                WHERE user_id = ? AND status = ? AND (cooldown_until IS NULL OR cooldown_until <= ?);
+                """,
+                (user_id, TASK_STATUS_BACKLOG, now_iso),
+            )
+            tasks = [Task(**dict(r)) for r in await cur.fetchall()]
+        tasks = [t for t in tasks if t.id not in exclude_ids]
+        tasks.sort(key=lambda t: (-t.priority, t.created_at))
+        return tasks[:limit]
+
+    async def fill_suggestion_slots(self, user_id: int, now: str) -> None:
+        """Ensure (7 - num_active) suggestion slots are filled. Active wins; total rows = 7."""
+        active_tasks = await self.get_active_tasks(user_id, limit=7)
+        need_suggestions = 7 - len(active_tasks)
+        if need_suggestions <= 0:
+            return
+        slots = await self.get_suggestion_slots(user_id)
+        in_slots = {tid for tid in slots if tid is not None}
+        exclude = in_slots | {t.id for t in active_tasks}
+        backlog = await self.get_backlog_tasks_for_fill(user_id, exclude_ids=exclude, limit=need_suggestions)
+        used = set(in_slots)
+        for i in range(need_suggestions):
+            if i < len(slots) and slots[i] is not None:
+                continue
+            for t in backlog:
+                if t.id not in used:
+                    await self.set_suggestion_slot(user_id, i, t.id, now)
+                    used.add(t.id)
+                    break
+
+    async def defer_task(self, user_id: int, task_id: int, hours: int = 18) -> bool:
+        """Set cooldown_until = now + hours, remove from slots, set status=backlog. Returns True if ok."""
+        now = self._now_iso()
+        from datetime import datetime, timedelta
+        try:
+            dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        except Exception:
+            dt = datetime.now(timezone.utc)
+        end = (dt + timedelta(hours=hours)).isoformat()
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                "UPDATE tasks SET status = ?, cooldown_until = ?, updated_at = ? WHERE user_id = ? AND id = ?;",
+                (TASK_STATUS_BACKLOG, end, now, user_id, task_id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return False
+        await self.remove_task_from_slots(user_id, task_id, now)
+        return True
+
+    async def get_active_card_message_id(self, user_id: int) -> Optional[int]:
+        """Stored message_id for the active task card (to edit/delete)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT active_card_message_id FROM user_settings WHERE user_id = ?;",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            if row and row["active_card_message_id"] is not None:
+                return int(row["active_card_message_id"])
+        return None
+
+    async def set_active_card_message_id(self, user_id: int, message_id: Optional[int]) -> None:
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO user_settings (user_id, timezone, show_done_in_home, updated_at, active_card_message_id)
+                VALUES (?, 'Europe/Helsinki', 1, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET updated_at = ?, active_card_message_id = ?;
+                """,
+                (user_id, now, message_id, now, message_id),
+            )
+            await db.commit()
 
     async def update_task(self, user_id: int, task_id: int, new_text: str) -> bool:
         # Re-parse priority from text (always recompute, never reuse old priority)
@@ -554,6 +806,18 @@ class TasksRepo:
                     task_id=task_id,
                     payload={'text': task.text},
                 )
+                # PROMPT 2: progress/XP hook (for gamification or analytics)
+                at = self._now_iso()
+                amount = 1.0  # or e.g. task.difficulty / 10 for XP
+                async with aiosqlite.connect(self._db_path) as db2:
+                    await db2.execute(
+                        """
+                        INSERT INTO progress_log (user_id, source, task_id, amount, at)
+                        VALUES (?, ?, ?, ?, ?);
+                        """,
+                        (user_id, PROGRESS_SOURCE_TASK_COMPLETED, task_id, amount, at),
+                    )
+                    await db2.commit()
             
             return success
     
@@ -606,8 +870,8 @@ class TasksRepo:
             now = self._now_iso()
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     user_id,
@@ -621,6 +885,11 @@ class TasksRepo:
                     'bang_suffix',
                     original_task.schedule_kind if original_task else None,
                     original_task.schedule_json if original_task else None,
+                    getattr(original_task, "deadline_time", None) if original_task else None,
+                    getattr(original_task, "scheduled_time_new", None) if original_task else None,
+                    TASK_STATUS_BACKLOG,
+                    None,
+                    getattr(original_task, "tags", "[]") if original_task else "[]",
                     now,
                     now
                 ),
@@ -746,8 +1015,8 @@ class TasksRepo:
             now = self._now_iso()
             cur = await db.execute(
                 """
-                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO tasks (user_id, text, task_type, difficulty, category, deadline, scheduled_time, priority, priority_source, schedule_kind, schedule_json, deadline_time, scheduled_time_new, status, cooldown_until, tags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     user_id,
@@ -761,6 +1030,11 @@ class TasksRepo:
                     priority_source,
                     schedule_kind,
                     schedule_json,
+                    deadline,
+                    scheduled_time,
+                    TASK_STATUS_BACKLOG,
+                    None,
+                    payload.get('tags', '[]') if isinstance(payload.get('tags'), str) else '[]',
                     now,
                     now
                 ),
@@ -969,18 +1243,20 @@ class TasksRepo:
     
     async def get_user_settings(self, user_id: int) -> dict:
         """
-        Get user settings (timezone, show_done_in_home, etc.).
+        Get user settings (timezone, show_done_in_home, time windows, etc.).
         
         Returns:
             Dict with keys:
             - timezone: str (default: 'Europe/Helsinki')
             - show_done_in_home: bool (default: True)
+            - day_start_time: str | None (e.g. '09:00', preferred day start)
+            - day_end_time: str | None (e.g. '17:00', preferred day end)
         """
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                SELECT timezone, show_done_in_home
+                SELECT timezone, show_done_in_home, day_start_time, day_end_time
                 FROM user_settings
                 WHERE user_id = ?;
                 """,
@@ -992,12 +1268,16 @@ class TasksRepo:
                 return {
                     'timezone': row['timezone'],
                     'show_done_in_home': bool(row['show_done_in_home']),
+                    'day_start_time': row['day_start_time'] if row['day_start_time'] is not None else None,
+                    'day_end_time': row['day_end_time'] if row['day_end_time'] is not None else None,
                 }
             else:
                 # Return defaults if user has no settings
                 return {
                     'timezone': 'Europe/Helsinki',
                     'show_done_in_home': True,
+                    'day_start_time': None,
+                    'day_end_time': None,
                 }
     
     async def set_user_timezone(self, user_id: int, timezone: str) -> bool:
@@ -1016,10 +1296,10 @@ class TasksRepo:
             # Use INSERT OR REPLACE to handle both new and existing users
             await db.execute(
                 """
-                INSERT OR REPLACE INTO user_settings (user_id, timezone, show_done_in_home, updated_at)
-                VALUES (?, ?, COALESCE((SELECT show_done_in_home FROM user_settings WHERE user_id = ?), 1), ?);
+                INSERT OR REPLACE INTO user_settings (user_id, timezone, show_done_in_home, day_start_time, day_end_time, updated_at)
+                VALUES (?, ?, COALESCE((SELECT show_done_in_home FROM user_settings WHERE user_id = ?), 1), (SELECT day_start_time FROM user_settings WHERE user_id = ?), (SELECT day_end_time FROM user_settings WHERE user_id = ?), ?);
                 """,
-                (user_id, timezone, user_id, now),
+                (user_id, timezone, user_id, user_id, user_id, now),
             )
             await db.commit()
             return True
@@ -1055,13 +1335,34 @@ class TasksRepo:
             # Update or insert
             await db.execute(
                 """
-                INSERT OR REPLACE INTO user_settings (user_id, timezone, show_done_in_home, updated_at)
-                VALUES (?, COALESCE((SELECT timezone FROM user_settings WHERE user_id = ?), 'Europe/Helsinki'), ?, ?);
+                INSERT OR REPLACE INTO user_settings (user_id, timezone, show_done_in_home, day_start_time, day_end_time, updated_at)
+                VALUES (?, COALESCE((SELECT timezone FROM user_settings WHERE user_id = ?), 'Europe/Helsinki'), ?, (SELECT day_start_time FROM user_settings WHERE user_id = ?), (SELECT day_end_time FROM user_settings WHERE user_id = ?), ?);
                 """,
-                (user_id, user_id, new_value, now),
+                (user_id, user_id, new_value, user_id, user_id, now),
             )
             await db.commit()
             return new_value
+
+    async def set_user_time_window(self, user_id: int, day_start_time: Optional[str] = None, day_end_time: Optional[str] = None) -> bool:
+        """
+        Set preferred day time window (e.g. "09:00", "17:00"). Used for scheduling/priority.
+        """
+        now = self._now_iso()
+        async with aiosqlite.connect(self._db_path) as db:
+            # Ensure row exists, then update
+            await db.execute(
+                """
+                INSERT INTO user_settings (user_id, timezone, show_done_in_home, day_start_time, day_end_time, updated_at)
+                VALUES (?, 'Europe/Helsinki', 1, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    day_start_time = COALESCE(?, day_start_time),
+                    day_end_time = COALESCE(?, day_end_time),
+                    updated_at = ?;
+                """,
+                (user_id, day_start_time, day_end_time, now, day_start_time, day_end_time, now),
+            )
+            await db.commit()
+            return True
 
     async def delete_task_with_log(self, user_id: int, task_id: int, reason: str = "") -> bool:
         """
@@ -1110,6 +1411,7 @@ class TasksRepo:
                 'scheduled_time': task.scheduled_time,
                 'schedule_kind': task.schedule_kind,
                 'schedule_json': task.schedule_json,
+                'tags': getattr(task, 'tags', '[]'),
             },
         )
     
@@ -2208,6 +2510,13 @@ class TasksRepo:
                         (next_row["order_index"], now, project_id),
                     )
                 else:
+                    # Mark any remaining active step as completed so project state is consistent
+                    await db.execute(
+                        """
+                        UPDATE project_steps SET status = ?, done_at = ? WHERE project_id = ? AND status = ?;
+                        """,
+                        ("completed", now, project_id, "active"),
+                    )
                     await db.execute(
                         """
                         UPDATE projects SET status = ?, current_step_order = NULL, updated_at = ?, completed_at = ? WHERE id = ?;

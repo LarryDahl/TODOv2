@@ -15,3 +15,6 @@ ACTION_TASK_DELETED = "task_deleted"
 ACTION_SUGGESTION_SHOWN = "suggestion_shown"
 ACTION_SUGGESTION_ACCEPTED = "suggestion_accepted"
 ACTION_SUGGESTION_IGNORED = "suggestion_ignored"
+
+# Progress log source (for XP/progress hooks)
+PROGRESS_SOURCE_TASK_COMPLETED = "task_completed"

@@ -354,59 +354,79 @@ def render_home_text(
 def build_home_keyboard(
     completed_tasks: list[dict],
     active_tasks: list[Task],
-    active_steps: list[dict]
+    active_steps: list[dict],
+) -> InlineKeyboardMarkup:
+    """Legacy: 3 done + active tasks + Projektit + nav. Prefer build_main_keyboard_6_3 for main view."""
+    kb = InlineKeyboardBuilder()
+    for comp_task in completed_tasks[:3]:
+        task_text = _label(comp_task.get("text", ""), 47)
+        kb.row(InlineKeyboardButton(text=f"✓ {task_text}", callback_data=f"completed:restore:{comp_task.get('id')}"))
+    for task in active_tasks:
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        kb.row(InlineKeyboardButton(text=_label(rendered_title, 48), callback_data=f"t:{task.id}"))
+    kb.row(InlineKeyboardButton(text="📋 Projektit", callback_data="view:projects"))
+    kb.row(
+        InlineKeyboardButton(text="+", callback_data="home:plus"),
+        InlineKeyboardButton(text="stats", callback_data="view:stats"),
+        InlineKeyboardButton(text="settings", callback_data="view:settings"),
+        InlineKeyboardButton(text="refresh", callback_data="home:refresh"),
+        width=4,
+    )
+    return kb.as_markup()
+
+
+def build_main_keyboard_6_3(
+    active_tasks: list[Task],
+    suggestion_tasks: list[Task | None],
+    completed_tasks: list[dict],
 ) -> InlineKeyboardMarkup:
     """
-    Build home view keyboard with reversed order (most important at bottom):
-    1) Completed tasks (oldest first): 3 items
-    2) Active tasks: priority order (lowest priority first, highest last)
-    3) Project steps: active step per project
-    4) Bottom row: [+][stats][settings][refresh]
-    
-    Args:
-        completed_tasks: List of completed task dicts (with 'id', 'text')
-        active_tasks: List of Task objects (sorted: lowest priority first, highest last)
-        active_steps: List of active project step dicts
-    
-    Returns:
-        InlineKeyboardMarkup
+    Default view: suggestions → done (3) → active → one menu row (emojis).
+    One button per task row. Menu: + | 📊 | ⚙️ | 🔄 | 📋
     """
     kb = InlineKeyboardBuilder()
-    
-    # 1) Completed tasks (oldest first, so newest appears at bottom)
+    # 1) Suggestion rows (click = set active)
+    for task in (suggestion_tasks + [None] * 7)[: 7 - len(active_tasks)]:
+        if task is None:
+            kb.row(InlineKeyboardButton(text="—", callback_data="noop"))
+            continue
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        kb.row(InlineKeyboardButton(text=_label(rendered_title, 48), callback_data=f"sug:active:{task.id}"))
+    # 2) 3 done rows (Restore)
     for comp_task in completed_tasks[:3]:
-        task_text = _label(comp_task.get('text', ''), 47)
+        task_text = _label(comp_task.get("text", ""), 47)
         kb.row(
             InlineKeyboardButton(
                 text=f"✓ {task_text}",
                 callback_data=f"completed:restore:{comp_task.get('id')}",
             )
         )
-    
-    # 2) Active tasks: priority order (lowest priority first, highest priority last)
-    # Tasks are already sorted with lowest priority first, so render in order
-    for task in active_tasks:
+    # 3) Active rows (click = mark done) — viimeisenä ennen valikkopainikkeita
+    for task in active_tasks[:7]:
         rendered_title = render_title_with_priority(task.text, task.priority)
-        task_text = _label(rendered_title, 48)
-        kb.row(
-            InlineKeyboardButton(
-                text=task_text,
-                callback_data=f"t:{task.id}",
-            )
-        )
-    
-    # 3) Projects menu (projektit oman valikon taakse)
-    kb.row(InlineKeyboardButton(text="📋 Projektit", callback_data="view:projects"))
-    
-    # 4) Bottom row: [+][stats][settings][refresh] (always at the very bottom)
+        kb.row(InlineKeyboardButton(text=_label(rendered_title, 48), callback_data=f"t:{task.id}"))
+    # 4) Yksi rivi: + | stats | settings | refresh | projektit (emojit)
     kb.row(
-        InlineKeyboardButton(text="+", callback_data="home:plus"),
-        InlineKeyboardButton(text="stats", callback_data="view:stats"),  # Legacy, kept for compatibility
-        InlineKeyboardButton(text="settings", callback_data="view:settings"),  # Legacy, kept for compatibility
-        InlineKeyboardButton(text="refresh", callback_data="home:refresh"),
-        width=4,
+        InlineKeyboardButton(text="➕", callback_data="home:plus"),
+        InlineKeyboardButton(text="📊", callback_data="view:stats"),
+        InlineKeyboardButton(text="⚙️", callback_data="view:settings"),
+        InlineKeyboardButton(text="🔄", callback_data="home:refresh"),
+        InlineKeyboardButton(text="📋", callback_data="view:projects"),
+        width=5,
     )
-    
+    return kb.as_markup()
+
+
+def render_active_card_text(task: Task) -> str:
+    """Text for the separate Active task card message."""
+    title = render_title_with_priority(task.text, task.priority)
+    return f"▶ Aktiivinen tehtävä\n\n{_label(title, 200)}"
+
+
+def active_card_kb(task: Task) -> InlineKeyboardMarkup:
+    """Single button: Mark done (moves to done list, clears active)."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✓ Merkitse tehdyksi", callback_data=f"t:{task.id}"))
     return kb.as_markup()
 
 
@@ -1006,8 +1026,8 @@ def step_edit_menu_kb(step: dict, project_id: int) -> InlineKeyboardMarkup:
         width=2,
     )
     
-    # Delete
-    kb.row(InlineKeyboardButton(text="🗑 Poista", callback_data=f"edit:step:delete:{step_id}"))
+    # Delete step (poista tehtävä)
+    kb.row(InlineKeyboardButton(text="🗑 Poista tehtävä", callback_data=f"edit:step:delete:{step_id}"))
     
     # Back to steps list
     kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data=f"edit:project:{project_id}"))

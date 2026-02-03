@@ -53,22 +53,55 @@ async def cb_restore_completed(cb: CallbackQuery, state: FSMContext, repo: Tasks
         await return_to_main_menu(cb, repo, state=state)
 
 
+@router.callback_query(F.data.startswith("sug:active:"))
+async def cb_sug_set_active(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Set suggestion task as active; remove from slots and fill one."""
+    from app.handlers.common import return_to_main_menu
+
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts and len(parts) >= 3 else None
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        return
+    now = repo._now_iso()
+    success = await repo.set_task_active(user_id=cb.from_user.id, task_id=task_id)
+    if not success:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    await repo.remove_task_from_slots(cb.from_user.id, task_id, now)
+    await return_to_main_menu(cb, repo, state=state, answer_text="Asetettu aktiiviseksi", force_refresh=True)
+
+
+@router.callback_query(F.data.startswith("sug:defer:"))
+async def cb_sug_defer(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Defer suggestion task (cooldown 18h), remove from slots and fill one."""
+    from app.handlers.common import return_to_main_menu
+
+    parts = parse_callback_data(cb.data, 3)
+    task_id = parse_int_safe(parts[2]) if parts and len(parts) >= 3 else None
+    if task_id is None:
+        await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
+        return
+    success = await repo.defer_task(user_id=cb.from_user.id, task_id=task_id, hours=18)
+    if success:
+        await return_to_main_menu(cb, repo, state=state, answer_text="Lykkäys asetettu", force_refresh=True)
+    else:
+        await cb.answer("Tehtävää ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+
+
 @router.callback_query(F.data.startswith("task:done:") | F.data.startswith("t:") | (F.data.startswith("ps:") & ~F.data.startswith("ps:del:")))
 async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """
     Unified handler for marking tasks and project steps as done.
-    Supports:
-    - task:done:<task_id> (existing format)
-    - t:<task_id> (new format)
-    - ps:<step_id> (project step format, but NOT ps:del: which is handled separately)
+    Supports: task:done:, t:, sug:done:, ps:<step_id>
     """
     import logging
     from app.handlers.common import return_to_main_menu
-    
+
     callback_data = cb.data
-    
-    # Branch based on callback prefix
-    # Note: ps:del: is excluded by filter, so this only handles ps:<step_id>
+
     if callback_data.startswith("ps:") and not callback_data.startswith("ps:del:"):
         # Handle project step
         parts = parse_callback_data(callback_data, 2)
@@ -112,19 +145,22 @@ async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
             await return_to_main_menu(cb, repo, state=state, force_refresh=True)
     
     else:
-        # Handle task (both task:done: and t: formats)
+        # Handle task: task:done:, t:
         if callback_data.startswith("task:done:"):
             parts = parse_callback_data(callback_data, 3)
             task_id = parse_int_safe(parts[2]) if parts else None
-        else:  # t: format
+        else:  # t:
             parts = parse_callback_data(callback_data, 2)
             task_id = parse_int_safe(parts[1]) if parts else None
-        
+
         if task_id is None:
             await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
             await return_to_main_menu(cb, repo, state=state)
             return
-        
+
+        # PROMPT 1: remove from suggestion slots and fill before completing (so list stays 6)
+        now = repo._now_iso()
+        await repo.remove_task_from_slots(cb.from_user.id, task_id, now)
         success = await repo.complete_task(user_id=cb.from_user.id, task_id=task_id)
         if success:
             await return_to_main_menu(cb, repo, state=state, answer_text="Tehtävä merkitty tehdyksi", force_refresh=True)

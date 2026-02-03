@@ -21,7 +21,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from app.db import TasksRepo
-from app.ui import build_home_keyboard, render_home_text
+from app.ui import build_main_keyboard_6_3, render_home_text
 
 
 class Flow(StatesGroup):
@@ -95,54 +95,55 @@ async def render_home_message(
     force_refresh: bool = False
 ) -> tuple[str, InlineKeyboardMarkup]:
     """
-    Unified function to render the main menu/home view.
-    This is the ONLY function that should render the main menu.
-    
-    Returns:
-        Tuple of (header_text, keyboard)
+    Default view: max 7 rows (active first, then suggestions), 3 done, Projektit, nav.
+    Active + suggestions ≤ 7; one button per row.
     """
     import logging
     import traceback
-    
-    # Debug log to track which renderer is called and from where
-    # Get caller info (skip this function and _show_home_* functions)
+    from typing import TYPE_CHECKING
+    if TYPE_CHECKING:
+        from app.db import Task
+
     stack = traceback.extract_stack()
     caller = stack[-3] if len(stack) >= 3 else None
     caller_info = f"{caller.filename}:{caller.lineno} in {caller.name}" if caller else "unknown"
-    
     logging.info(
         f"[MAIN_MENU] render_home_message called for user {user_id} "
         f"(force_refresh={force_refresh}) from {caller_info}"
     )
-    
-    # Get user settings (for show_done_in_home)
+
     settings = await repo.get_user_settings(user_id=user_id)
-    show_done = settings.get('show_done_in_home', True)
-    
-    # Fetch data
+    show_done = settings.get("show_done_in_home", True)
+    now = repo._now_iso()
+
+    active_tasks = await repo.get_active_tasks(user_id, limit=7)
+    need_suggestions = 7 - len(active_tasks)
+    await repo.fill_suggestion_slots(user_id, now)
+    slot_ids = await repo.get_suggestion_slots(user_id)
+    suggestion_tasks: list["Task | None"] = []
+    for i in range(need_suggestions):
+        tid = slot_ids[i] if i < len(slot_ids) else None
+        if tid is None:
+            suggestion_tasks.append(None)
+        else:
+            t = await repo.get_task(user_id, tid)
+            suggestion_tasks.append(t)
+
     completed = await repo.list_completed_tasks(user_id=user_id, limit=3) if show_done else []
-    active = await repo.list_tasks(user_id=user_id, limit=50)  # Get more for proper sorting
-    active_steps = await repo.get_active_project_steps()
-    
-    # Count completed tasks today (for progress bar) - all tasks, not just visible ones
     completed_count_today = await repo.count_completed_tasks_today(user_id=user_id)
-    active_count = len(active)
-    
-    # Build header text with progress bar
+    active_count = len(active_tasks) + sum(1 for t in suggestion_tasks if t is not None)
+
     header_text = render_home_text(
         completed_count=completed_count_today,
         active_count=active_count,
-        active_steps=active_steps,
-        force_refresh=force_refresh
+        active_steps=[],
+        force_refresh=force_refresh,
     )
-    
-    # Build keyboard with new order
-    keyboard = build_home_keyboard(
+    keyboard = build_main_keyboard_6_3(
+        active_tasks=active_tasks,
+        suggestion_tasks=suggestion_tasks,
         completed_tasks=completed if show_done else [],
-        active_tasks=active,
-        active_steps=active_steps
     )
-    
     return header_text, keyboard
 
 
@@ -150,78 +151,68 @@ async def _show_home_from_message(message: Message, repo: TasksRepo, state: FSMC
     """Show default home view from message. Always clears state and returns to main menu."""
     import logging
     import traceback
-    
-    # Get caller info
+
     stack = traceback.extract_stack()
     caller = stack[-2] if len(stack) >= 2 else None
     caller_info = f"{caller.filename}:{caller.lineno} in {caller.name}" if caller else "unknown"
-    
     logging.info(
         f"[MAIN_MENU] _show_home_from_message called (user_id={message.from_user.id}) from {caller_info}"
     )
-    
+
     if state:
         await state.clear()
-    
+
+    user_id = message.from_user.id
     header_text, keyboard = await render_home_message(
-        user_id=message.from_user.id,
-        repo=repo,
-        force_refresh=False
+        user_id=user_id, repo=repo, force_refresh=False
     )
-    
     await message.answer(header_text, reply_markup=keyboard)
 
 
 async def _show_home_from_cb(
-    cb: CallbackQuery, 
-    repo: TasksRepo, 
+    cb: CallbackQuery,
+    repo: TasksRepo,
     state: FSMContext | None = None,
-    answer_text: str | None = None, 
+    answer_text: str | None = None,
     force_refresh: bool = False
 ) -> None:
     """Show default home view from callback. Always clears state, answers callback, and returns to main menu."""
     import logging
     import traceback
     from aiogram.exceptions import TelegramBadRequest
-    
-    # Get caller info
+
     stack = traceback.extract_stack()
     caller = stack[-2] if len(stack) >= 2 else None
     caller_info = f"{caller.filename}:{caller.lineno} in {caller.name}" if caller else "unknown"
-    
     logging.info(
         f"[MAIN_MENU] _show_home_from_cb called (user_id={cb.from_user.id}, "
         f"force_refresh={force_refresh}, callback_data={cb.data}) from {caller_info}"
     )
-    
+
     if state:
         await state.clear()
-    
+
+    user_id = cb.from_user.id
     header_text, keyboard = await render_home_message(
-        user_id=cb.from_user.id,
-        repo=repo,
-        force_refresh=force_refresh
+        user_id=user_id, repo=repo, force_refresh=force_refresh
     )
-    
+
     if cb.message:
         try:
             await cb.message.edit_text(header_text, reply_markup=keyboard)
         except TelegramBadRequest as e:
-            # If message is not modified and we're forcing refresh, try with reply_markup only
             if "message is not modified" in str(e).lower() and force_refresh:
                 try:
-                    # Force update by editing reply markup separately
                     await cb.message.edit_reply_markup(reply_markup=keyboard)
                 except Exception:
-                    pass  # If still fails, just answer
+                    pass
             elif "message is not modified" in str(e).lower():
-                pass  # Message is already up to date
+                pass
             else:
-                raise  # Re-raise other errors
+                raise
         except Exception:
-            pass  # Ignore other errors and just answer
-    
-    # Always answer callback - use provided text or default
+            pass
+
     if answer_text:
         await cb.answer(answer_text)
     else:

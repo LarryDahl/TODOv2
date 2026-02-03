@@ -25,7 +25,11 @@ from app.ui import (
     deleted_tasks_kb,
     done_tasks_kb,
     edit_kb,
+    project_detail_view_kb,
+    projects_list_kb,
     render_edit_header,
+    render_project_detail,
+    render_projects_list_header,
     render_settings_header,
     render_stats_header,
     render_all_time_stats,
@@ -166,6 +170,79 @@ async def cb_reset(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> Non
     if cb.message:
         await cb.message.edit_text("✅ Kaikki tiedot nollattu.", reply_markup=settings_kb())
     await cb.answer("Tiedot nollattu")
+
+
+@router.callback_query(F.data == "view:projects")
+async def cb_projects_list(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open projects list (päänäkymä > projektit)"""
+    await state.clear()
+    projects = await repo.list_all_projects()
+    if cb.message:
+        await cb.message.edit_text(
+            render_projects_list_header(),
+            reply_markup=projects_list_kb(projects),
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("view:project:"))
+async def cb_project_detail(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open project detail: all steps, click toggles done/not done"""
+    await state.clear()
+    parts = parse_callback_data(cb.data, 3)
+    project_id = parse_int_safe(parts[2]) if parts and len(parts) >= 3 else None
+    if project_id is None:
+        await cb.answer("Virheellinen projektin-id.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    project = await repo.get_project(project_id)
+    if not project:
+        await cb.answer("Projektia ei löytynyt.", show_alert=True)
+        await return_to_main_menu(cb, repo, state=state)
+        return
+    steps = await repo.get_project_steps(project_id)
+    if cb.message:
+        await cb.message.edit_text(
+            render_project_detail(project, steps),
+            reply_markup=project_detail_view_kb(project, steps),
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("proj:step:toggle:"))
+async def cb_proj_step_toggle(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Toggle project step done/not done and refresh project detail view"""
+    from app.utils import parse_callback_data, parse_int_safe
+
+    parts = parse_callback_data(cb.data, 4)
+    step_id = parse_int_safe(parts[3]) if parts and len(parts) >= 4 else None
+    if step_id is None:
+        await cb.answer("Virheellinen askel-id.", show_alert=True)
+        return
+    try:
+        now = repo._now_iso()
+        result = await repo.toggle_project_step(step_id=step_id, now=now)
+    except ValueError:
+        await cb.answer("Askelia ei löytynyt.", show_alert=True)
+        return
+    project_id = result.get("project_id")
+    if not project_id or not cb.message:
+        await cb.answer()
+        return
+    project = await repo.get_project(project_id)
+    if not project:
+        await cb.answer("Projektia ei löytynyt.", show_alert=True)
+        return
+    steps = await repo.get_project_steps(project_id)
+    await cb.message.edit_text(
+        render_project_detail(project, steps),
+        reply_markup=project_detail_view_kb(project, steps),
+    )
+    action = result.get("action", "completed")
+    if action == "completed_project":
+        await cb.answer("Projekti valmis!", show_alert=False)
+    else:
+        await cb.answer()
 
 
 @router.callback_query(F.data.in_(["view:edit", "home:edit"]))
