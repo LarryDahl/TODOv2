@@ -1,5 +1,11 @@
 """
 Handlers for task suggestions feature.
+
+ROUTER MAP:
+- view:suggestions - Show suggestions view
+- suggestion:accept:<event_id> - Accept suggestion (restore task)
+- suggestion:snooze:<event_id> - Snooze suggestion
+- suggestion:ignore:<event_id> - Ignore suggestion
 """
 from __future__ import annotations
 

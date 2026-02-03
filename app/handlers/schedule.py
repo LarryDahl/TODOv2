@@ -1,5 +1,17 @@
 """
 Schedule flow handlers for setting schedules on tasks.
+
+ROUTER MAP:
+- task:schedule:<task_id> - Start schedule flow for existing task
+- add:scheduled:date:<offset> - Select scheduled date (for new task)
+- add:scheduled:time:<time> - Select scheduled time (for new task)
+- schedule:type:<kind> - Select schedule type (at_time/time_range/all_day)
+- schedule:date:<offset> - Select schedule date (for existing task)
+- schedule:time:<time> - Select schedule time (for existing task)
+- schedule:time_range:start - Start time for time range
+- schedule:time_range:end - End time for time range
+- schedule:custom_time - Custom time input
+- schedule:back - Back in schedule flow
 """
 from __future__ import annotations
 
@@ -345,7 +357,7 @@ async def cb_add_scheduled_date(cb: CallbackQuery, state: FSMContext, repo: Task
 @router.callback_query(F.data.startswith("add:scheduled:time:"))
 async def cb_add_scheduled_time(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Handle scheduled time selection when adding task"""
-    from app.handlers.helpers import add_task_with_schedule
+    from app.handlers.common import Flow
     
     parts = parse_callback_data(cb.data, 4)
     time_option = parts[3] if parts else None
@@ -358,23 +370,31 @@ async def cb_add_scheduled_time(cb: CallbackQuery, state: FSMContext, repo: Task
         return
     
     if time_option == "back":
-        await state.set_state(Flow.waiting_task_category)
+        # Go back to date selection
+        from app.ui import date_picker_kb
         if cb.message:
-            task_text = data.get(CtxKeys.add_task_text, '')
             await cb.message.edit_text(
-                f"Tehtävä: {task_text}\n\n🗓 Valitse päivämäärä:",
+                "🗓 Ajastettu tehtävä\n\nValitse päivämäärä:",
                 reply_markup=date_picker_kb("add:scheduled:date", include_none=False)
             )
         await cb.answer()
         return
     
     if time_option == "custom":
+        # Store that we're waiting for custom time input
+        await state.set_state(Flow.waiting_task_scheduled)
         if cb.message:
             await cb.message.answer("Kirjoita aika muodossa HHMM tai HH:MM (esim. 0930 tai 09:30):")
         await cb.answer()
         return
     
-    await add_task_with_schedule(cb, state, repo, data, date_offset, time_option)
+    # Store time and move to text input state
+    await state.update_data({CtxKeys.add_scheduled_time: time_option})
+    await state.set_state(Flow.waiting_scheduled_text)
+    
+    if cb.message:
+        await cb.message.answer("Kirjoita tehtävän teksti viestinä:")
+    await cb.answer()
 
 
 @router.message(Flow.waiting_task_scheduled)
@@ -385,28 +405,42 @@ async def msg_add_scheduled_custom_time(message: Message, state: FSMContext, rep
         await message.answer("Virheellinen aika. Käytä muotoa HHMM tai HH:MM (esim. 0930 tai 09:30).")
         return
     
+    # Store time and move to text input state
+    await state.update_data({CtxKeys.add_scheduled_time: time_str})
+    await state.set_state(Flow.waiting_scheduled_text)
+    
+    await message.answer("Kirjoita tehtävän teksti viestinä:")
+
+
+@router.message(Flow.waiting_scheduled_text)
+async def msg_add_scheduled_text(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """Handle text input for scheduled task (after date/time selection)"""
+    from app.handlers.common import return_to_main_menu
+    
+    task_text = (message.text or "").strip()
+    if not task_text:
+        await message.answer("Tyhjä tehtävä ei kelpaa. Kirjoita tehtävä viestinä.")
+        return
+    
     data = await state.get_data()
     date_offset = data.get(CtxKeys.add_scheduled_date_offset)
+    time_str = data.get(CtxKeys.add_scheduled_time)
     
-    if date_offset is None:
+    if date_offset is None or not time_str:
+        await message.answer("Virhe: päivämäärä tai aika puuttuu.")
         await return_to_main_menu(message, repo, state=state)
         return
     
     date_dt = get_date_offset_days(date_offset)
     schedule_payload = {"timestamp": format_datetime_iso(combine_date_time(date_dt, time_str))}
     
-    task_text = data.get(CtxKeys.add_task_text)
-    if not task_text:
-        await message.answer("Virhe: tehtävän teksti puuttuu.")
-        return
-    
     task_id = await repo.add_task(
         user_id=message.from_user.id,
         text=task_text,
-        task_type=data.get(CtxKeys.add_task_type, 'regular'),
-        difficulty=data.get(CtxKeys.add_task_difficulty, 5),
-        category=data.get(CtxKeys.add_task_category, '')
+        task_type='scheduled',
+        difficulty=5,
+        category=''
     )
     
     await repo.set_schedule(task_id=task_id, user_id=message.from_user.id, schedule_kind="at_time", schedule_payload=schedule_payload)
-    await return_to_main_menu(message, repo, state=state)
+    await return_to_main_menu(message, repo, state=state, answer_text="Tehtävä lisätty", force_refresh=True)

@@ -1,5 +1,21 @@
 """
 Add task flow handlers.
+
+ROUTER MAP:
+- home:plus - Open plus menu (add task/project/edit)
+- add:task_type - Open task type selection
+- add:regular - Start regular task flow
+- add:scheduled - Start scheduled task flow
+- add:deadline - Start deadline task flow
+- add:project - Start project creation flow
+- add:type:<type> - Set task type (legacy)
+- add:difficulty:<n> - Set difficulty (legacy)
+- add:category:<cat> - Set category (legacy)
+- add:scheduled:date:<offset> - Select scheduled date
+- add:scheduled:time:<time> - Select scheduled time
+- add:deadline:date:<offset> - Select deadline date
+- add:deadline:time:<time> - Select deadline time
+- view:add_backlog - Legacy add project (use add:project)
 """
 from __future__ import annotations
 
@@ -25,11 +41,106 @@ from app.ui import (
 router = Router()
 
 
-@router.callback_query(F.data == "view:add")
-async def cb_add_task(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
-    await state.set_state(Flow.waiting_task_type)
+@router.callback_query(F.data.in_(["view:add", "home:plus"]))
+async def cb_plus_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open plus menu with main options"""
+    from app.ui import plus_menu_kb, render_plus_menu_header
+    
+    await state.clear()  # Clear any existing state
+    if cb.message:
+        await cb.message.edit_text(render_plus_menu_header(), reply_markup=plus_menu_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "add:task_type")
+async def cb_add_task_type(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open task type selection submenu"""
+    from app.ui import add_task_type_kb, render_add_type_header
+    
+    await state.clear()
     if cb.message:
         await cb.message.edit_text(render_add_type_header(), reply_markup=add_task_type_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "add:regular")
+async def cb_add_regular(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Start regular task flow - just ask for text"""
+    await state.clear()
+    await state.set_state(Flow.waiting_new_task_text)
+    # Store that this is a regular task (no type/difficulty/category selection)
+    await state.update_data({
+        CtxKeys.add_task_type: 'regular',
+        CtxKeys.add_task_difficulty: 5,
+        CtxKeys.add_task_category: ''
+    })
+    
+    if cb.message:
+        await cb.message.answer("Kirjoita tehtävän teksti viestinä:")
+    await cb.answer()
+
+
+@router.callback_query(F.data == "add:scheduled")
+async def cb_add_scheduled(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Start scheduled task flow - date -> time -> text"""
+    from app.ui import date_picker_kb
+    
+    await state.clear()
+    # Store that this is a scheduled task
+    await state.update_data({
+        CtxKeys.add_task_type: 'scheduled',
+        CtxKeys.add_task_difficulty: 5,
+        CtxKeys.add_task_category: ''
+    })
+    
+    if cb.message:
+        await cb.message.edit_text(
+            "🗓 Ajastettu tehtävä\n\nValitse päivämäärä:",
+            reply_markup=date_picker_kb("add:scheduled:date", include_none=False)
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "add:deadline")
+async def cb_add_deadline(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Start deadline task flow - date -> time -> text"""
+    from app.ui import date_picker_kb
+    
+    await state.clear()
+    # Store that this is a deadline task
+    await state.update_data({
+        CtxKeys.add_task_type: 'deadline',
+        CtxKeys.add_task_difficulty: 5,
+        CtxKeys.add_task_category: ''
+    })
+    
+    if cb.message:
+        await cb.message.edit_text(
+            "⏰ Määräaikainen tehtävä\n\nValitse päivämäärä:",
+            reply_markup=date_picker_kb("add:deadline:date")
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "add:project")
+async def cb_add_project(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Start project creation flow (same as view:add_backlog)"""
+    await state.clear()
+    await state.set_state(Flow.waiting_project_name)
+    if cb.message:
+        await cb.message.answer("Projektin nimi?")
+    await cb.answer()
+
+
+@router.callback_query(F.data == "home:edit")
+async def cb_edit_from_plus(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
+    """Open edit tasks view from plus menu"""
+    from app.ui import edit_kb, render_edit_header
+    
+    await state.clear()
+    tasks = await repo.list_tasks(user_id=cb.from_user.id)
+    if cb.message:
+        await cb.message.edit_text(render_edit_header(), reply_markup=edit_kb(tasks))
     await cb.answer()
 
 
@@ -122,6 +233,13 @@ async def cb_add_category(cb: CallbackQuery, state: FSMContext, repo: TasksRepo)
 
 @router.message(Flow.waiting_new_task_text)
 async def msg_new_task(message: Message, state: FSMContext, repo: TasksRepo) -> None:
+    """
+    Handle new task text input.
+    
+    This handler is used for:
+    - Regular tasks from plus menu (add:regular) - adds immediately
+    - Old flow with type/difficulty/category selection (legacy, still supported)
+    """
     text = (message.text or "").strip()
     if not text:
         await message.answer("Tyhjä tehtävä ei kelpaa. Kirjoita tehtävä viestinä.")
@@ -129,7 +247,25 @@ async def msg_new_task(message: Message, state: FSMContext, repo: TasksRepo) -> 
 
     data = await state.get_data()
     
-    # Check if we're in the add task flow
+    # Check if we're in the simplified flow (from plus menu)
+    # If add_task_type is 'regular' and we have default difficulty/category, add immediately
+    task_type = data.get(CtxKeys.add_task_type, 'regular')
+    difficulty = data.get(CtxKeys.add_task_difficulty, 5)
+    category = data.get(CtxKeys.add_task_category, '')
+    
+    # If it's a regular task with defaults, add immediately (simplified flow)
+    if task_type == 'regular' and difficulty == 5 and category == '':
+        await repo.add_task(
+            user_id=message.from_user.id,
+            text=text,
+            task_type='regular',
+            difficulty=5,
+            category=''
+        )
+        await return_to_main_menu(message, repo, state=state, answer_text="Tehtävä lisätty", force_refresh=True)
+        return
+    
+    # Legacy flow: continue to difficulty selection if type is set but not defaults
     if CtxKeys.add_task_type in data:
         # Store text and continue to difficulty selection (priority parsed in add_task)
         await state.update_data({CtxKeys.add_task_text: text})
@@ -243,24 +379,7 @@ async def msg_project_steps(message: Message, state: FSMContext, repo: TasksRepo
     await return_to_main_menu(message, repo, state=state, answer_text="Projekti luotu", force_refresh=True)
 
 
-@router.message()
-async def msg_default_add_task(message: Message, state: FSMContext, repo: TasksRepo) -> None:
-    """Default: any text message = new task (by default)"""
-    if message.text and message.text.startswith("/"):
-        await return_to_main_menu(message, repo, state=state)
-        return
-
-    text = (message.text or "").strip()
-    if not text:
-        await return_to_main_menu(message, repo, state=state)
-        return
-
-    # Add as regular task with defaults (priority parsed in add_task)
-    await repo.add_task(
-        user_id=message.from_user.id,
-        text=text,
-        task_type='regular',
-        difficulty=5,
-        category=''
-    )
-    await return_to_main_menu(message, repo, state=state)
+# REMOVED: msg_default_add_task handler
+# This functionality is now handled by app/handlers/text_messages.py
+# which ensures "free message = new task" only when user is NOT in FSM state.
+# The centralized handler checks FSM state before creating a task.
