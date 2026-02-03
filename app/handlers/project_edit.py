@@ -157,12 +157,10 @@ async def cb_step_edit_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRep
         await return_to_main_menu(cb, repo, state=state)
         return
     
-    # Show step edit menu
+    # Show step edit menu (no step number; consistent with list view)
     step_text = step.get('text', '')
     status = step.get('status', 'pending')
-    order_index = step.get('order_index', 0)
-    
-    header = f"Muokkaa askelta\n\n{order_index}. {step_text}\n\nStatus: {status}"
+    header = f"Muokkaa askelta\n\n{step_text}\n\nStatus: {status}"
     
     if cb.message:
         await cb.message.edit_text(

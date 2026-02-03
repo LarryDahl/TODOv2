@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from app.handlers import add_task, deadline, project_edit, schedule, suggestions, tasks, views, text_messages  # noqa: F401
+from app.handlers import add_task, deadline, project_edit, routines, schedule, suggestions, tasks, views, text_messages  # noqa: F401
 
 # Create main router
 router = Router()
@@ -20,6 +20,7 @@ router.include_router(schedule.router)
 router.include_router(add_task.router)
 router.include_router(project_edit.router)
 router.include_router(suggestions.router)
+router.include_router(routines.router)
 router.include_router(text_messages.router)  # Must be last (catch-all for text messages)
 
 # Export common types for use in other modules

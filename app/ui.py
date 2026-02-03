@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -5,6 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db import Task
 from app.priority import render_title_with_priority
+from app.ui_builder import ButtonSpec, build_kb
 
 
 # UI text constants for projects
@@ -25,23 +27,34 @@ def _label(text: str, max_len: int = 48) -> str:
 # render_home_message() -> build_home_keyboard().
 
 
-def settings_kb(show_done: bool = True) -> InlineKeyboardMarkup:
+def settings_kb(
+    show_done: bool = True,
+    morning_routines_enabled: bool = False,
+    evening_routines_enabled: bool = False,
+) -> InlineKeyboardMarkup:
     """
-    Settings view: timezone, show done toggle, export DB, back.
-    
+    Settings view: timezone, show done, morning/evening routines toggles, export DB, back.
+
     Args:
         show_done: Current value of show_done_in_home setting
+        morning_routines_enabled: Current value of morning_routines_enabled
+        evening_routines_enabled: Current value of evening_routines_enabled
     """
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="Aseta aikavyöhyke", callback_data="settings:timezone"))
-    
-    # Toggle button shows current state
+    from app.callbacks import (
+        SETTINGS_TOGGLE_MORNING_ROUTINES,
+        SETTINGS_TOGGLE_EVENING_ROUTINES,
+    )
     toggle_text = "✅ Näytä tehdyt päänäkymässä" if show_done else "❌ Älä näytä tehtyjä päänäkymässä"
-    kb.row(InlineKeyboardButton(text=toggle_text, callback_data="settings:toggle_show_done"))
-    
-    kb.row(InlineKeyboardButton(text="Export DB", callback_data="settings:export_db"))
-    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
-    return kb.as_markup()
+    morning_text = "✅ Aamurutiinit päällä" if morning_routines_enabled else "❌ Aamurutiinit pois"
+    evening_text = "✅ Iltarutiinit päällä" if evening_routines_enabled else "❌ Iltarutiinit pois"
+    return build_kb([
+        [ButtonSpec("Aseta aikavyöhyke", "settings:timezone")],
+        [ButtonSpec(toggle_text, "settings:toggle_show_done")],
+        [ButtonSpec(morning_text, SETTINGS_TOGGLE_MORNING_ROUTINES)],
+        [ButtonSpec(evening_text, SETTINGS_TOGGLE_EVENING_ROUTINES)],
+        [ButtonSpec("Export DB", "settings:export_db")],
+        [ButtonSpec("Takaisin", "home:home")],
+    ])
 
 
 def settings_timezone_kb() -> InlineKeyboardMarkup:
@@ -144,12 +157,12 @@ def stats_menu_kb() -> InlineKeyboardMarkup:
     - stats:reset -> show reset confirmation
     - view:home -> return to home
     """
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="Stats all time", callback_data="stats:all_time"))
-    kb.row(InlineKeyboardButton(text="AI-analyysi", callback_data="stats:ai"))
-    kb.row(InlineKeyboardButton(text="Reset stats", callback_data="stats:reset"))
-    kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
-    return kb.as_markup()
+    return build_kb([
+        [ButtonSpec("Stats all time", "stats:all_time")],
+        [ButtonSpec("AI-analyysi", "stats:ai")],
+        [ButtonSpec("Reset stats", "stats:reset")],
+        [ButtonSpec("Takaisin", "home:home")],
+    ])
 
 
 def stats_kb() -> InlineKeyboardMarkup:
@@ -229,7 +242,6 @@ def plus_menu_kb() -> InlineKeyboardMarkup:
     """
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="Lisää tehtävä", callback_data="add:task_type"))
-    kb.row(InlineKeyboardButton(text=UI_ADD_PROJECT, callback_data="add:project"))
     kb.row(InlineKeyboardButton(text="Muokkaa tehtäviä", callback_data="home:edit"))
     kb.row(InlineKeyboardButton(text="Takaisin", callback_data="home:home"))
     return kb.as_markup()
@@ -334,11 +346,19 @@ def render_home_text(
     # Build progress bar
     progress_bar = render_progress_bar(progress_percent)
     
-    # Build instructions (2-3 lines max)
+    # Build instructions (UTF-8, emojis for nav)
     instructions = (
-        "Klikkaa tehtävää = merkitse tehdyksi\n"
-        "+ = lisää tehtävä\n"
-        "refresh = päivitä lista"
+        "Uusi viesti = uusi tehtävä\n"
+        "! viestin lopussa = +1 prioriteetti\n"
+        "Klikkaa tehtävää = valmis\n"
+        "➕ lisää/muokkaa\n"
+        "📊 tilastot\n"
+        "⚙️ asetukset\n"
+        "📋 projektit\n"
+        "🔄 päivitä lista\n"
+        "✅ viimeisin tehty tehtävä\n"
+        "▶ aktiivinen tehtävä\n"
+        "💡 ehdotukset"
     )
     
     # Combine
@@ -356,21 +376,24 @@ def build_home_keyboard(
     active_tasks: list[Task],
     active_steps: list[dict],
 ) -> InlineKeyboardMarkup:
-    """Legacy: 3 done + active tasks + Projektit + nav. Prefer build_main_keyboard_6_3 for main view."""
+    """Legacy: done (1) → active (▶) → Projektit + nav. Prefer build_main_keyboard_6_3 for main view."""
     kb = InlineKeyboardBuilder()
-    for comp_task in completed_tasks[:3]:
+    # 1) Done tasks (1 most recent)
+    for comp_task in completed_tasks[:1]:
         task_text = _label(comp_task.get("text", ""), 47)
         kb.row(InlineKeyboardButton(text=f"✓ {task_text}", callback_data=f"completed:restore:{comp_task.get('id')}"))
+    # 2) Active tasks (▶ prefix)
     for task in active_tasks:
         rendered_title = render_title_with_priority(task.text, task.priority)
-        kb.row(InlineKeyboardButton(text=_label(rendered_title, 48), callback_data=f"t:{task.id}"))
+        kb.row(InlineKeyboardButton(text=f"▶ {_label(rendered_title, 46)}", callback_data=f"t:{task.id}"))
     kb.row(InlineKeyboardButton(text="📋 Projektit", callback_data="view:projects"))
     kb.row(
-        InlineKeyboardButton(text="+", callback_data="home:plus"),
-        InlineKeyboardButton(text="stats", callback_data="view:stats"),
-        InlineKeyboardButton(text="settings", callback_data="view:settings"),
-        InlineKeyboardButton(text="refresh", callback_data="home:refresh"),
-        width=4,
+        InlineKeyboardButton(text="➕", callback_data="home:plus"),
+        InlineKeyboardButton(text="📊", callback_data="view:stats"),
+        InlineKeyboardButton(text="⚙️", callback_data="view:settings"),
+        InlineKeyboardButton(text="📋", callback_data="view:projects"),
+        InlineKeyboardButton(text="🔄", callback_data="home:refresh"),
+        width=5,
     )
     return kb.as_markup()
 
@@ -381,40 +404,34 @@ def build_main_keyboard_6_3(
     completed_tasks: list[dict],
 ) -> InlineKeyboardMarkup:
     """
-    Default view: suggestions → done (3) → active → one menu row (emojis).
+    Default view: done (1) → active (▶) → suggestions (💡) → one menu row. Total 1 + 9 task rows.
     One button per task row. Menu: + | 📊 | ⚙️ | 🔄 | 📋
     """
-    kb = InlineKeyboardBuilder()
-    # 1) Suggestion rows (click = set active)
-    for task in (suggestion_tasks + [None] * 7)[: 7 - len(active_tasks)]:
+    rows: list[list[ButtonSpec]] = []
+    # 1) Done tasks (1 most recent)
+    for comp_task in completed_tasks[:1]:
+        task_text = _label(comp_task.get("text", ""), 47)
+        rows.append([ButtonSpec(f"✓ {task_text}", f"completed:restore:{comp_task.get('id')}")])
+    # 2) Active tasks (▶ prefix; click = mark done), max 9
+    for task in active_tasks[:9]:
+        rendered_title = render_title_with_priority(task.text, task.priority)
+        rows.append([ButtonSpec(f"▶ {_label(rendered_title, 46)}", f"t:{task.id}")])
+    # 3) Suggestion rows (💡 prefix; click = set active); no placeholder for empty slots
+    for task in suggestion_tasks:
         if task is None:
-            kb.row(InlineKeyboardButton(text="—", callback_data="noop"))
             continue
         rendered_title = render_title_with_priority(task.text, task.priority)
-        kb.row(InlineKeyboardButton(text=_label(rendered_title, 48), callback_data=f"sug:active:{task.id}"))
-    # 2) 3 done rows (Restore)
-    for comp_task in completed_tasks[:3]:
-        task_text = _label(comp_task.get("text", ""), 47)
-        kb.row(
-            InlineKeyboardButton(
-                text=f"✓ {task_text}",
-                callback_data=f"completed:restore:{comp_task.get('id')}",
-            )
-        )
-    # 3) Active rows (click = mark done) — viimeisenä ennen valikkopainikkeita
-    for task in active_tasks[:7]:
-        rendered_title = render_title_with_priority(task.text, task.priority)
-        kb.row(InlineKeyboardButton(text=_label(rendered_title, 48), callback_data=f"t:{task.id}"))
-    # 4) Yksi rivi: + | stats | settings | refresh | projektit (emojit)
-    kb.row(
-        InlineKeyboardButton(text="➕", callback_data="home:plus"),
-        InlineKeyboardButton(text="📊", callback_data="view:stats"),
-        InlineKeyboardButton(text="⚙️", callback_data="view:settings"),
-        InlineKeyboardButton(text="🔄", callback_data="home:refresh"),
-        InlineKeyboardButton(text="📋", callback_data="view:projects"),
-        width=5,
-    )
-    return kb.as_markup()
+        rows.append([ButtonSpec(f"💡 {_label(rendered_title, 46)}", f"sug:active:{task.id}")])
+    # 4) One menu row: + | stats | settings | projektit | refresh
+    rows.append([
+        ButtonSpec("➕", "home:plus"),
+        ButtonSpec("📊", "view:stats"),
+        ButtonSpec("⚙️", "view:settings"),
+        ButtonSpec("📋", "view:projects"),
+        ButtonSpec("🔄", "home:refresh"),
+    ])
+    row_widths = [None] * (len(rows) - 1) + [5]
+    return build_kb(rows, row_widths)
 
 
 def render_active_card_text(task: Task) -> str:
@@ -544,6 +561,16 @@ def render_ai_analysis_disabled() -> str:
 def render_ai_analysis_placeholder(period: str) -> str:
     """Placeholder message for AI analysis (not yet implemented)"""
     return f"AI-analyysi ei käytössä (disabled)\n\nAjanjakso: {period}\n\nAI-analyysi toteutetaan myöhemmin."
+
+
+def render_ai_analysis_result(period: str, analysis_text: str) -> str:
+    """Header + AI analysis result for the chosen period"""
+    return f"🤖 AI-analyysi — {period}\n\n{analysis_text}"
+
+
+def render_ai_analysis_error() -> str:
+    """Shown when AI analysis fails; instructs user to use back button."""
+    return "Analyysi epäonnistui. Käytä Takaisin-nappia palataksesi tilastoihin."
 
 
 def render_reset_stats_confirm() -> str:
@@ -731,12 +758,17 @@ def render_suggestions_header(count: int) -> str:
 
 def render_projects_list_header() -> str:
     """Header for projects list (päänäkymä > projektit)"""
-    return "📋 Projektit\n\nValitse projekti nähdäksesi askeleet ja merkitä ne tehdyiksi."
+    return (
+        "📋 Projektit\n\n"
+        "Projekti on tehtäväkokoelma: lista askeleita, jotka merkitään tehdyiksi yksi kerrallaan.\n\n"
+        "Valitse projekti nähdäksesi askeleet tai tee uusi projekti."
+    )
 
 
 def projects_list_kb(projects: list[dict]) -> InlineKeyboardMarkup:
-    """Projects list: project buttons + Takaisin + Asetukset (edit:projects)"""
+    """Projects list: Tee projekti, then project buttons, then Asetukset + Takaisin"""
     kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="➕ " + UI_ADD_PROJECT, callback_data="add:project"))
     for project in projects:
         title = project.get("title", "Untitled")
         status = project.get("status", "active")
@@ -762,19 +794,27 @@ def projects_list_kb(projects: list[dict]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def _project_completion_ranks(steps: list[dict]) -> dict[int, int]:
+    """Return step_id -> completion_rank (1-based) for completed steps, by done_at order."""
+    completed = [(s.get("id"), s.get("done_at") or "") for s in steps if s.get("status") == "completed"]
+    completed.sort(key=lambda x: x[1])
+    return {step_id: rank for rank, (step_id, _) in enumerate(completed, start=1)}
+
+
 def project_detail_view_kb(project: dict, steps: list[dict]) -> InlineKeyboardMarkup:
-    """Project detail view: each step as button (toggle done), back to project list"""
+    """Project detail view: each step as button (toggle done), back to project list.
+    Undone steps: plain text. Done steps: ✅ and completion order number."""
     kb = InlineKeyboardBuilder()
+    ranks = _project_completion_ranks(steps)
     for step in steps:
         step_id = step.get("id", 0)
-        order_index = step.get("order_index", 0)
         step_text = step.get("text", "")
         status = step.get("status", "pending")
         if status == "completed":
-            status_icon = "✅"
+            rank = ranks.get(step_id, 0)
+            step_display = f"✅ {rank}. {_label(step_text, 40)}"
         else:
-            status_icon = "☐"
-        step_display = f"{status_icon} {order_index}. {_label(step_text, 40)}"
+            step_display = _label(step_text, 40)
         kb.row(
             InlineKeyboardButton(
                 text=step_display,
@@ -818,21 +858,18 @@ def render_project_detail(project: dict, steps: list[dict]) -> str:
     lines.append(f"Edistyminen: {completed_count}/{total_steps}")
     lines.append("")
     
-    # List all steps with status
+    # Completion order for done steps (by done_at)
+    ranks = _project_completion_ranks(steps)
+    # List all steps: undone = plain text, done = ✅ and completion number
     for step in steps:
-        order_index = step.get('order_index', 0)
         step_text = step.get('text', '')
         status = step.get('status', 'pending')
-        
-        # Format status label
-        if status == 'active':
-            status_label = "[ACTIVE]"
-        elif status == 'completed':
-            status_label = "[DONE]"
-        else:  # pending
-            status_label = "[PENDING]"
-        
-        lines.append(f"{status_label} {step_text}")
+        step_id = step.get('id', 0)
+        if status == 'completed':
+            rank = ranks.get(step_id, 0)
+            lines.append(f"✅ {rank}. {step_text}")
+        else:
+            lines.append(step_text)
     
     return "\n".join(lines)
 
@@ -938,29 +975,22 @@ def projects_edit_kb(projects: list[dict]) -> InlineKeyboardMarkup:
 
 
 def project_steps_edit_kb(project: dict, steps: list[dict]) -> InlineKeyboardMarkup:
-    """Edit view: list of project steps with edit/delete/reorder options"""
+    """Edit view: list of project steps with edit/delete/reorder options.
+    Undone steps: plain text. Done steps: ✅ and completion order number."""
     kb = InlineKeyboardBuilder()
     
     project_id = project.get('id', 0)
+    ranks = _project_completion_ranks(steps)
     
-    # List all steps
     for step in steps:
         step_id = step.get('id', 0)
-        order_index = step.get('order_index', 0)
         step_text = step.get('text', '')
         status = step.get('status', 'pending')
-        
-        # Format status indicator
         if status == 'completed':
-            status_icon = "✅"
-        elif status == 'active':
-            status_icon = "▶️"
+            rank = ranks.get(step_id, 0)
+            step_display = f"✅ {rank}. {_label(step_text, 40)}"
         else:
-            status_icon = "⏸️"
-        
-        # Step display: [status] order. text
-        step_display = f"{status_icon} {order_index}. {_label(step_text, 40)}"
-        
+            step_display = _label(step_text, 40)
         kb.row(
             InlineKeyboardButton(
                 text=step_display,
@@ -969,7 +999,7 @@ def project_steps_edit_kb(project: dict, steps: list[dict]) -> InlineKeyboardMar
         )
     
     # Add step button
-    kb.row(InlineKeyboardButton(text="➕ Lisää askel", callback_data=f"edit:step:add:{project_id}"))
+    kb.row(InlineKeyboardButton(text="➕ Lisää tehtävä", callback_data=f"edit:step:add:{project_id}"))
     
     # Reorder button
     kb.row(InlineKeyboardButton(text="🔄 Järjestä uudelleen", callback_data=f"edit:step:reorder:{project_id}"))
@@ -991,13 +1021,79 @@ def render_project_steps_edit_header(project: dict, steps: list[dict]) -> str:
     project_title = project.get('title', 'Unknown Project')
     total_steps = len(steps)
     completed_count = sum(1 for s in steps if s.get('status') == 'completed')
-    
+
     lines = [f"📋 {project_title}", ""]
     lines.append(f"Askeleita: {completed_count}/{total_steps} valmiina")
     lines.append("")
     lines.append("Klikkaa askelta muokataksesi sitä.")
-    
+
     return "\n".join(lines)
+
+
+def render_routine_list_edit_header(routine_type: str) -> str:
+    """Header for routine list edit view (morning/evening)."""
+    label = "Aamurutiini" if routine_type == "morning" else "Iltarutiini"
+    return f"{label} – tehtävät\n\nValitse tehtävä muokataksesi tai lisää uusi."
+
+
+def routine_list_edit_kb(routine_type: str, tasks: list[dict]) -> InlineKeyboardMarkup:
+    """Edit view: list of routine tasks (click to edit), add, back."""
+    kb = InlineKeyboardBuilder()
+    for task in tasks:
+        task_text = _label(task.get("text", ""), 48)
+        task_id = task.get("id", 0)
+        kb.row(
+            InlineKeyboardButton(
+                text=task_text,
+                callback_data=f"routine:edit_task:{routine_type}:{task_id}",
+            )
+        )
+    kb.row(InlineKeyboardButton(text="➕ Lisää tehtävä", callback_data=f"routine:add:{routine_type}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Takaisin", callback_data="settings:routines:edit_menu"))
+    return kb.as_markup()
+
+
+def render_routine_active_header(routine_type: str, all_done: bool) -> str:
+    """Header for active routine view (morning/evening). all_done=True when every task is done today."""
+    label = "Aamurutiini" if routine_type == "morning" else "Iltarutiini"
+    if all_done:
+        return f"{label}\n\n✅ Kaikki tehty! Klikkaa 'Kuittaa tehdyksi' palataksesi normaaliruutuun."
+    return f"{label}\n\nMerkitse tehtävät tehdyiksi tai kuittaa rutiini lopuksi."
+
+
+def routine_active_kb(
+    routine_type: str,
+    tasks: list[dict],
+    completed: set[int],
+    all_done: bool,
+) -> InlineKeyboardMarkup:
+    """Active routine view: one button per task (toggle done), optionally 'Kuittaa tehdyksi', Muokkaa listaa."""
+    kb = InlineKeyboardBuilder()
+    for task in tasks:
+        task_id = task.get("id", 0)
+        task_text = _label(task.get("text", ""), 48)
+        is_done = task_id in completed
+        prefix = "✅ " if is_done else "☐ "
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{prefix}{task_text}",
+                callback_data=f"routine:toggle:{routine_type}:{task_id}",
+            )
+        )
+    if all_done:
+        kb.row(
+            InlineKeyboardButton(
+                text="Kuittaa tehdyksi",
+                callback_data=f"routine:quitted:{routine_type}",
+            )
+        )
+    kb.row(
+        InlineKeyboardButton(
+            text="✏️ Muokkaa listaa",
+            callback_data=f"routine:edit_list:{routine_type}",
+        )
+    )
+    return kb.as_markup()
 
 
 def step_edit_menu_kb(step: dict, project_id: int) -> InlineKeyboardMarkup:

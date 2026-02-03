@@ -3,8 +3,22 @@ Utility functions for date/time parsing and formatting.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Optional
+
+# HH:MM 24h, strict: ^([01]\d|2[0-3]):[0-5]\d$
+HHMM_STRICT_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def parse_hhmm_strict(text: str) -> Optional[str]:
+    """Validate and return HH:MM if matches ^([01]\\d|2[0-3]):[0-5]\\d$, else None."""
+    if not text:
+        return None
+    t = text.strip()
+    if HHMM_STRICT_RE.match(t):
+        return t
+    return None
 
 
 def parse_time_input(text: str) -> Optional[str]:
@@ -29,6 +43,18 @@ def parse_time_string(time_str: str) -> Optional[tuple[int, int]]:
     except (ValueError, AttributeError):
         pass
     return None
+
+
+def time_in_window(hour: int, minute: int, start_str: str, end_str: str) -> bool:
+    """
+    True iff (hour, minute) is in [start_str, end_str) (same day, start < end).
+    Uses parse_time_string; returns False if start_str/end_str are invalid.
+    """
+    start_t = parse_time_string(start_str)
+    end_t = parse_time_string(end_str)
+    if start_t is None or end_t is None:
+        return False
+    return start_t <= (hour, minute) < end_t
 
 
 def get_date_offset_days(offset: int) -> datetime:

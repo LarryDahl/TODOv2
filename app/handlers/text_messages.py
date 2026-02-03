@@ -46,6 +46,12 @@ FSM_INPUT_STATES = {
     Flow.waiting_project_steps,
     Flow.waiting_project_step_text,
     Flow.waiting_project_rewrite_steps,
+    Flow.waiting_routine_add_text,
+    Flow.waiting_routine_edit_text,
+    Flow.waiting_morning_start,
+    Flow.waiting_morning_end,
+    Flow.waiting_evening_start,
+    Flow.waiting_evening_end,
 }
 
 

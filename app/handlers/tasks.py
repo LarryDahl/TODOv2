@@ -24,20 +24,41 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from app.callbacks import (
+    PREFIX_COMPLETED_RESTORE,
+    PREFIX_P,
+    PREFIX_P_DEL,
+    PREFIX_PS,
+    PREFIX_PS_DEL,
+    PREFIX_SUG_ACTIVE,
+    PREFIX_SUG_DEFER,
+    PREFIX_T,
+    PREFIX_TASK_DEL,
+    PREFIX_TASK_DONE,
+    PREFIX_TASK_EDIT_MENU,
+    PREFIX_TASK_EDIT_TEXT,
+    PREFIX_TASK_DL_PLUS1H,
+    PREFIX_TASK_DL_PLUS24H,
+    PREFIX_TASK_DL_REMOVE,
+    PREFIX_TASK_MENU,
+    PREFIX_TASK_PRIORITY_DOWN,
+    PREFIX_TASK_PRIORITY_UP,
+    parse_callback,
+)
 from app.clock import SystemClock
 from app.db import TasksRepo
 from app.handlers.common import CtxKeys, Flow, return_to_main_menu
 from app.priority import parse_priority, render_title_with_priority
-from app.utils import parse_callback_data, parse_int_safe
+from app.utils import parse_int_safe
 
 router = Router()
 
 
-@router.callback_query(F.data.startswith("completed:restore:"))
+@router.callback_query(F.data.startswith(PREFIX_COMPLETED_RESTORE))
 async def cb_restore_completed(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     from app.handlers.common import return_to_main_menu
-    
-    parts = parse_callback_data(cb.data, 3)
+
+    parts = parse_callback(cb.data, 3)
     event_id = parse_int_safe(parts[2]) if parts else None
     
     if event_id is None:
@@ -53,12 +74,12 @@ async def cb_restore_completed(cb: CallbackQuery, state: FSMContext, repo: Tasks
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("sug:active:"))
+@router.callback_query(F.data.startswith(PREFIX_SUG_ACTIVE))
 async def cb_sug_set_active(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Set suggestion task as active; remove from slots and fill one."""
     from app.handlers.common import return_to_main_menu
 
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts and len(parts) >= 3 else None
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
@@ -73,12 +94,12 @@ async def cb_sug_set_active(cb: CallbackQuery, state: FSMContext, repo: TasksRep
     await return_to_main_menu(cb, repo, state=state, answer_text="Asetettu aktiiviseksi", force_refresh=True)
 
 
-@router.callback_query(F.data.startswith("sug:defer:"))
+@router.callback_query(F.data.startswith(PREFIX_SUG_DEFER))
 async def cb_sug_defer(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Defer suggestion task (cooldown 18h), remove from slots and fill one."""
     from app.handlers.common import return_to_main_menu
 
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts and len(parts) >= 3 else None
     if task_id is None:
         await cb.answer("Virheellinen tehtävä-id.", show_alert=True)
@@ -91,7 +112,10 @@ async def cb_sug_defer(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:done:") | F.data.startswith("t:") | (F.data.startswith("ps:") & ~F.data.startswith("ps:del:")))
+@router.callback_query(
+    F.data.startswith(PREFIX_TASK_DONE) | F.data.startswith(PREFIX_T)
+    | (F.data.startswith(PREFIX_PS) & ~F.data.startswith(PREFIX_PS_DEL))
+)
 async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """
     Unified handler for marking tasks and project steps as done.
@@ -102,9 +126,9 @@ async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
 
     callback_data = cb.data
 
-    if callback_data.startswith("ps:") and not callback_data.startswith("ps:del:"):
+    if callback_data.startswith(PREFIX_PS) and not callback_data.startswith(PREFIX_PS_DEL):
         # Handle project step
-        parts = parse_callback_data(callback_data, 2)
+        parts = parse_callback(callback_data, 2)
         step_id = parse_int_safe(parts[1]) if parts else None
         
         if step_id is None:
@@ -146,11 +170,11 @@ async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
     
     else:
         # Handle task: task:done:, t:
-        if callback_data.startswith("task:done:"):
-            parts = parse_callback_data(callback_data, 3)
+        if callback_data.startswith(PREFIX_TASK_DONE):
+            parts = parse_callback(callback_data, 3)
             task_id = parse_int_safe(parts[2]) if parts else None
         else:  # t:
-            parts = parse_callback_data(callback_data, 2)
+            parts = parse_callback(callback_data, 2)
             task_id = parse_int_safe(parts[1]) if parts else None
 
         if task_id is None:
@@ -169,12 +193,12 @@ async def cb_done(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None
             await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("p:"))
+@router.callback_query(F.data.startswith(PREFIX_P))
 async def cb_project_detail(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Show project detail view with all steps"""
     from app.ui import project_detail_kb, render_project_detail
     
-    parts = parse_callback_data(cb.data, 2)
+    parts = parse_callback(cb.data, 2)
     project_id = parse_int_safe(parts[1]) if parts else None
     
     if project_id is None:
@@ -197,10 +221,10 @@ async def cb_project_detail(cb: CallbackQuery, state: FSMContext, repo: TasksRep
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("ps:del:"))
+@router.callback_query(F.data.startswith(PREFIX_PS_DEL))
 async def cb_delete_project_step(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Delete a project step. If active, automatically advances the project."""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     step_id = parse_int_safe(parts[2]) if parts else None
     
     if step_id is None:
@@ -218,10 +242,10 @@ async def cb_delete_project_step(cb: CallbackQuery, state: FSMContext, repo: Tas
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("p:del:"))
+@router.callback_query(F.data.startswith(PREFIX_P_DEL))
 async def cb_cancel_project(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Cancel a project - marks it as cancelled and hides all steps"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     project_id = parse_int_safe(parts[2]) if parts else None
     
     if project_id is None:
@@ -240,10 +264,10 @@ async def cb_cancel_project(cb: CallbackQuery, state: FSMContext, repo: TasksRep
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:del:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_DEL))
 async def cb_delete(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Start delete flow - prompt user for deletion reason"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -316,12 +340,12 @@ async def msg_delete_reason(message: Message, state: FSMContext, repo: TasksRepo
         await return_to_main_menu(message, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:menu:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_MENU))
 async def cb_task_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Show action menu for a task"""
     from app.ui import task_action_kb
     
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -344,12 +368,12 @@ async def cb_task_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("task:edit_menu:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_EDIT_MENU))
 async def cb_edit_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Show edit menu for a task"""
     from app.ui import task_edit_menu_kb, render_task_edit_menu_header
     
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -371,10 +395,10 @@ async def cb_edit_menu(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("task:edit_text:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_EDIT_TEXT))
 async def cb_edit_text(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Start edit task text flow - prompt user for new text"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -443,10 +467,10 @@ async def msg_edit_task(message: Message, state: FSMContext, repo: TasksRepo) ->
         await return_to_main_menu(message, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:priority_up:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_PRIORITY_UP))
 async def cb_priority_up(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Increase task priority by 1"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -477,10 +501,10 @@ async def cb_priority_up(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) 
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:priority_down:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_PRIORITY_DOWN))
 async def cb_priority_down(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Decrease task priority by 1"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -511,10 +535,10 @@ async def cb_priority_down(cb: CallbackQuery, state: FSMContext, repo: TasksRepo
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:dl_plus1h:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_DL_PLUS1H))
 async def cb_dl_plus1h(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Set or push deadline by +1 hour from now (Helsinki time)"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -561,10 +585,10 @@ async def cb_dl_plus1h(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) ->
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:dl_plus24h:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_DL_PLUS24H))
 async def cb_dl_plus24h(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Set or push deadline by +24 hours from now (Helsinki time)"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:
@@ -611,10 +635,10 @@ async def cb_dl_plus24h(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -
         await return_to_main_menu(cb, repo, state=state)
 
 
-@router.callback_query(F.data.startswith("task:dl_remove:"))
+@router.callback_query(F.data.startswith(PREFIX_TASK_DL_REMOVE))
 async def cb_dl_remove(cb: CallbackQuery, state: FSMContext, repo: TasksRepo) -> None:
     """Remove deadline from task"""
-    parts = parse_callback_data(cb.data, 3)
+    parts = parse_callback(cb.data, 3)
     task_id = parse_int_safe(parts[2]) if parts else None
     
     if task_id is None:

@@ -6,7 +6,10 @@ import os
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import ExceptionTypeFilter
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ErrorEvent
 
 from app.config import load_settings
 from app.db import TasksRepo
@@ -57,6 +60,15 @@ async def main() -> None:
 
         dp["repo"] = repo
         dp.include_router(router)
+
+        @dp.error(ExceptionTypeFilter(TelegramBadRequest))
+        async def handle_old_callback_query(event: ErrorEvent) -> None:
+            """Ignore TelegramBadRequest for old/invalid callback queries (e.g. after bot restart)."""
+            msg = str(event.exception).lower()
+            if "query is too old" in msg or "query id is invalid" in msg or "response timeout expired" in msg:
+                logger.debug("Ignoring old/invalid callback query: %s", event.exception)
+                return
+            raise event.exception
 
         logger.info(f"Starting polling - PID: {pid}")
         logger.info("Bot is ready to receive updates")

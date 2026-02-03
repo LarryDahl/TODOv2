@@ -64,25 +64,23 @@ class SystemClock:
         return datetime.now(SystemClock._get_user_tz())
     
     @staticmethod
-    def now_user_tz(timezone: str = "Europe/Helsinki") -> datetime:
+    def now_user_tz(tz_name: str = "Europe/Helsinki") -> datetime:
         """
         Get current time in user's timezone.
-        
-        Args:
-            timezone: Timezone string (e.g., 'Europe/Helsinki', 'UTC', 'America/New_York')
-        
-        Returns:
-            Current datetime in specified timezone
+        Windows: ZoneInfo("Europe/Helsinki") voi epäonnistua ilman tzdata -> fallback UTC+2.
         """
         if _HAS_ZONEINFO:
             try:
-                tz = ZoneInfo(timezone)
+                tz = ZoneInfo(tz_name)
                 return datetime.now(tz)
             except Exception:
-                # Fallback to UTC if timezone invalid
+                # Fallback: Europe/Helsinki = UTC+2 (talvi), muuten UTC
+                if tz_name == "Europe/Helsinki":
+                    return datetime.now(timezone(timedelta(hours=2)))
                 return datetime.now(SystemClock._get_utc_tz())
         else:
-            # No zoneinfo available, use UTC as fallback
+            if tz_name == "Europe/Helsinki":
+                return datetime.now(timezone(timedelta(hours=2)))
             return datetime.now(SystemClock._get_utc_tz())
     
     @staticmethod
